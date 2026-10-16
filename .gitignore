@@ -1,0 +1,17 @@
+# Dependencies & Builds
+node_modules/
+.next/
+out/
+build/
+.pio/
+
+# Local captures & user credentials
+webapp/public/captures/*
+!webapp/public/captures/.gitkeep
+webapp/prusa-lapse.config.json
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+*.log
+.env*

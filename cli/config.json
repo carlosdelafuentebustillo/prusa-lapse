@@ -1,0 +1,13 @@
+{
+  "triggerType": "park",
+  "qualityMode": "high",
+  "parkX": 150,
+  "parkY": 150,
+  "travelSpeed": 9000,
+  "retractDistance": 1.4,
+  "retractSpeed": 2400,
+  "settleTime": 600,
+  "captureTime": 4000,
+  "zHopHeight": 0.4,
+  "triggerSignal": "m220"
+}

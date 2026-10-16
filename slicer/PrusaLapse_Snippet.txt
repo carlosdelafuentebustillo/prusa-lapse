@@ -1,0 +1,26 @@
+--- Prusa-lapse Custom G-Code Snippet ---
+
+Since importing a .ini file creates a brand new printer profile (which disconnects from your Prusa Connect physical printer), the best way to use Prusa-lapse is to simply paste this G-Code into your EXISTING Prusa Connect printer profile.
+
+INSTRUCTIONS:
+1. Open PrusaSlicer.
+2. Go to the "Printer Settings" tab.
+3. Make sure your current printer profile (the one linked to Prusa Connect) is selected in the dropdown.
+4. Click on "Custom G-code" in the left menu.
+5. Scroll down to the "After layer change G-code" text box.
+6. Copy the code below and paste it at the bottom of that text box.
+7. Click the "Save" icon next to your printer profile name (e.g. name it "Original Prusa MK4S - Timelapse"). This saves a variation of your profile that is STILL linked to your physical Prusa Connect printer!
+
+--- COPY EVERYTHING BELOW THIS LINE ---
+
+; --- Prusa-lapse Layer Change Trigger ---
+{if layer_num > 0}
+G1 E-2.0 F2100 ; Retract 2mm to prevent stringing
+G1 X240 Y210 F6000 ; Move to park position (back-right corner)
+G4 P500 ; Wait 500ms for vibrations to settle
+M220 S99 ; Signal for the Prusa-lapse monitor
+G4 P2000 ; Wait 2 seconds for cameras to capture
+M220 S100 ; Clear LCD message / restore speed factor
+G1 E2.0 F2100 ; Un-retract
+{endif}
+; --- End Prusa-lapse Trigger ---
