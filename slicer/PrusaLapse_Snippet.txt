@@ -1,8 +1,10 @@
---- Prusa-lapse Custom G-Code Snippet ---
+--- Prusa-lapse Custom G-Code Snippet (Firmware v1.2.2+) ---
 
-Since importing a .ini file creates a brand new printer profile (which disconnects from your Prusa Connect physical printer), the best way to use Prusa-lapse is to simply paste this G-Code into your EXISTING Prusa Connect printer profile.
+NOTE: Starting in Firmware v1.2.2, Prusa-lapse features Hybrid Triggering:
+- Mode A (Zero-Config Smart Z-Height): If you slice normally WITHOUT any custom G-code, the cameras automatically detect confirmed layer Z-height advances via PrusaLink telemetry (filtering out travel Z-hops and MBL probing) and capture each layer on the fly!
+- Mode B (Parked Extruder G-Code): Paste the snippet below into PrusaSlicer if you want the extruder parked out of the way in the back-right corner for every frame. Once the camera detects M220 S99 (or M221 S99), it automatically locks into Parked G-Code mode for the remainder of the print.
 
-INSTRUCTIONS:
+INSTRUCTIONS (for Mode B - Parked Extruder):
 1. Open PrusaSlicer.
 2. Go to the "Printer Settings" tab.
 3. Make sure your current printer profile (the one linked to Prusa Connect) is selected in the dropdown.
@@ -13,14 +15,20 @@ INSTRUCTIONS:
 
 --- COPY EVERYTHING BELOW THIS LINE ---
 
-; --- Prusa-lapse Layer Change Trigger ---
-{if layer_num > 0}
-G1 E-2.0 F2100 ; Retract 2mm to prevent stringing
-G1 X240 Y210 F6000 ; Move to park position (back-right corner)
-G4 P500 ; Wait 500ms for vibrations to settle
-M220 S99 ; Signal for the Prusa-lapse monitor
-G4 P2000 ; Wait 2 seconds for cameras to capture
-M220 S100 ; Clear LCD message / restore speed factor
-G1 E2.0 F2100 ; Un-retract
+; --- Prusa-lapse Layer Change Trigger (Parked Mode) ---
+{if layer_num > 1}
+M83 ; Relative extruder mode
+G1 E-0.8 F2100 ; Retract 0.8mm (Direct Drive / Nextruder safe)
+G91 ; Relative positioning
+G1 Z0.4 F1200 ; Lift Z by 0.4mm to clear printed part
+G90 ; Absolute positioning
+G1 X240 Y200 F9000 ; Park printhead at back-right corner
+M400 ; Wait for park move to complete
+G4 P300 ; Wait 300ms for frame vibrations to settle
+M220 S99 ; Signal Prusa-lapse cameras (M221 S99 also supported)
+G4 P1200 ; Wait 1.2s for high-res UXGA capture
+M220 S100 ; Restore 100% speed factor
+G1 Z{layer_z} F1200 ; Restore exact layer Z height
+G1 E0.8 F2100 ; Un-retract filament
 {endif}
 ; --- End Prusa-lapse Trigger ---

@@ -265,6 +265,8 @@ export function injectTriggers(gcodeText, config = {}) {
         outLines.push('M264 P0 S0 ; Reset Hackerboard GPIO');
       } else if (triggerSignal === 'serial') {
         outLines.push('M118 action:capture_photo ; Trigger Serial');
+      } else if (triggerSignal === 'm221') {
+        outLines.push('M221 S99 ; Trigger PrusaLink capture via Flow factor');
       } else {
         outLines.push('M220 S99 ; Trigger PrusaLink capture');
       }
@@ -274,8 +276,10 @@ export function injectTriggers(gcodeText, config = {}) {
         outLines.push(`G4 P${captureTime} ; Wait for camera capture`);
       }
 
-      // 7. Restore speed factor if M220 was used
-      if (triggerSignal !== 'gpio0' && triggerSignal !== 'serial') {
+      // 7. Restore speed/flow factor if M220/M221 was used
+      if (triggerSignal === 'm221') {
+        outLines.push('M221 S100 ; Restore flow factor');
+      } else if (triggerSignal !== 'gpio0' && triggerSignal !== 'serial') {
         outLines.push('M220 S100 ; Restore speed factor');
       }
 

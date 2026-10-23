@@ -76,6 +76,10 @@ export default function CameraCard({ cleanIp, idx, cameraSettings, updateCameraS
   const prusa_connect_token = getCameraVal(cleanIp, 'prusa_connect_token', '');
   const prusa_connect_code = getCameraVal(cleanIp, 'last_prusa_connect_code', getCameraVal(cleanIp, 'prusa_connect_code', 0));
   const fingerprint = getCameraVal(cleanIp, 'fingerprint', '');
+  const trigger_mode = getCameraVal(cleanIp, 'trigger_mode', 'auto');
+  const last_z = getCameraVal(cleanIp, 'last_z', -1);
+  const printer_state = getCameraVal(cleanIp, 'printer_state', '');
+  const job_progress = getCameraVal(cleanIp, 'job_progress', 0);
 
   useEffect(() => {
     setCameraNameInput(getCameraVal(cleanIp, 'camera_name', `Camera ${idx + 1}`));
@@ -92,7 +96,12 @@ export default function CameraCard({ cleanIp, idx, cameraSettings, updateCameraS
           Live Preview: {getCameraVal(cleanIp, 'camera_name', `Camera ${idx + 1}`)} ({cleanIp})
         </span>
         {hasSettings && (
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.7rem', fontFamily: 'var(--font-mono)' }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.7rem', fontFamily: 'var(--font-mono)', flexWrap: 'wrap' }}>
+            {printer_state === 'PRINTING' && (
+              <span style={{ background: 'rgba(34,197,94,0.18)', color: '#22c55e', border: '1px solid rgba(34,197,94,0.35)', padding: '1px 6px', borderRadius: '4px', fontWeight: '600' }} title="Active Timelapse Trigger Mode">
+                {trigger_mode === 'gcode' ? 'G-CODE PARK' : 'SMART Z'}{Number(last_z) >= 0 ? ` · Z ${Number(last_z).toFixed(2)}mm` : ''}{Number(job_progress) > 0 ? ` (${Math.round(Number(job_progress))}%)` : ''}
+              </span>
+            )}
             {firmware_version && (
               <span style={{ background: 'rgba(250,104,49,0.15)', color: 'var(--color-orange)', border: '1px solid rgba(250,104,49,0.3)', padding: '1px 6px', borderRadius: '4px' }} title="Firmware Version">
                 {firmware_version}

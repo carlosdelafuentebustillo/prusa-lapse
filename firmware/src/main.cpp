@@ -21,8 +21,8 @@ String prusaConnectFingerprint = "";
 int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
-#define VERSION_MINOR 8
-#define FIRMWARE_VERSION "v1.2.1"
+#define VERSION_MINOR 9
+#define FIRMWARE_VERSION "v1.2.2"
 
 bool offlineMode = false;
 bool sdCardAvailable = false;
@@ -231,6 +231,16 @@ int last_http_code = 0; // Added globally for diagnostics
 int offlineFrameCount = 0;
 uint32_t lastPollTime = 0;
 float currentZValue = -1.0;
+float maxConfirmedZ = -1.0;
+float prevPollZ = -1.0;
+int zStableCount = 0;
+bool gcodeTriggerUsedInJob = false;
+int currentJobId = -1;
+String currentPrinterState = "";
+float currentJobProgress = 0.0;
+float currentTempNozzle = 0.0;
+float currentTargetNozzle = 0.0;
+String activeTriggerMode = "auto";
 uint32_t lastHeartbeatTime = 0;
 
 // Prusa Connect Cloud Camera Integration
@@ -328,9 +338,9 @@ void captureTask(void *pvParameters) {
       }
       
       // Flush stale frames and let sensor settle at new resolution
-      // (also gives auto-exposure time to adjust to flash if enabled)
-      for (int i = 0; i < 3; i++) {
-        vTaskDelay(pdMS_TO_TICKS(250));
+      // (2 frames with 120ms delay flushes fb_count=2 buffers in ~0.5s total)
+      for (int i = 0; i < 2; i++) {
+        vTaskDelay(pdMS_TO_TICKS(120));
         camera_fb_t *old_fb = esp_camera_fb_get();
         if (old_fb) esp_camera_fb_return(old_fb);
       }
@@ -1193,6 +1203,12 @@ void setupWebServer() {
     json += "\"prusa_connect_info_sent\":" + String(prusaConnectInfoSent ? 1 : 0) + ",";
     json += "\"fingerprint\":\"" + prusaConnectFingerprint + "\",";
     json += "\"last_z\":" + String(currentZValue) + ",";
+    json += "\"max_z\":" + String(maxConfirmedZ) + ",";
+    json += "\"trigger_mode\":\"" + activeTriggerMode + "\",";
+    json += "\"job_id\":" + String(currentJobId) + ",";
+    json += "\"printer_state\":\"" + currentPrinterState + "\",";
+    json += "\"job_progress\":" + String(currentJobProgress, 1) + ",";
+    json += "\"temp_nozzle\":" + String(currentTempNozzle, 1) + ",";
     json += "\"camera_name\":\"" + cameraName + "\",";
     json += "\"wifi_rssi\":" + String(WiFi.RSSI()) + ",";
     json += "\"firmware_version\":\"" + String(FIRMWARE_VERSION) + "\"";
@@ -1486,10 +1502,74 @@ void setup() {
             current_speed = payload.substring(speedIdx + 8, endS).toInt();
           }
 
+          int flowIdx = payload.indexOf("\"flow\":");
+          int current_flow = 100;
+          if (flowIdx != -1) {
+            int endF = payload.indexOf(",", flowIdx);
+            if (endF == -1) endF = payload.indexOf("}", flowIdx);
+            current_flow = payload.substring(flowIdx + 7, endF).toInt();
+          }
+
+          int tempNozIdx = payload.indexOf("\"temp_nozzle\":");
+          float temp_nozzle = -1.0;
+          if (tempNozIdx != -1) {
+            int endTN = payload.indexOf(",", tempNozIdx);
+            if (endTN == -1) endTN = payload.indexOf("}", tempNozIdx);
+            temp_nozzle = payload.substring(tempNozIdx + 14, endTN).toFloat();
+          }
+
+          int targetNozIdx = payload.indexOf("\"target_nozzle\":");
+          float target_nozzle = -1.0;
+          if (targetNozIdx != -1) {
+            int endTGN = payload.indexOf(",", targetNozIdx);
+            if (endTGN == -1) endTGN = payload.indexOf("}", targetNozIdx);
+            target_nozzle = payload.substring(targetNozIdx + 16, endTGN).toFloat();
+          }
+
+          int jobId = -1;
+          int jobSectionIdx = payload.indexOf("\"job\":");
+          if (jobSectionIdx != -1) {
+            int idIdx = payload.indexOf("\"id\":", jobSectionIdx);
+            int jobEndIdx = payload.indexOf("}", jobSectionIdx);
+            if (idIdx != -1 && (jobEndIdx == -1 || idIdx < jobEndIdx)) {
+              int endId = payload.indexOf(",", idIdx);
+              if (endId == -1 || (jobEndIdx != -1 && endId > jobEndIdx)) endId = jobEndIdx;
+              if (endId != -1) {
+                jobId = payload.substring(idIdx + 5, endId).toInt();
+              }
+            }
+          }
+
+          currentPrinterState = state;
+          if (job_progress >= 0.0f) currentJobProgress = job_progress;
+          if (temp_nozzle >= 0.0f) currentTempNozzle = temp_nozzle;
+          if (target_nozzle >= 0.0f) currentTargetNozzle = target_nozzle;
+
+          static bool printSessionActive = false;
+
+          // Detect job change or new print session start
+          if (jobId > 0 && currentJobId > 0 && jobId != currentJobId) {
+            maxConfirmedZ = -1.0;
+            prevPollZ = -1.0;
+            zStableCount = 0;
+            gcodeTriggerUsedInJob = false;
+            activeTriggerMode = "auto";
+          }
+          if (jobId > 0) {
+            currentJobId = jobId;
+          }
+
           // Session state management
           if (state != "") {
-            if (offlineMode) {
-              if (state == "PRINTING" && previousPrinterState != "PRINTING") {
+            if (state == "PRINTING" && !printSessionActive) {
+              printSessionActive = true;
+              maxConfirmedZ = -1.0;
+              prevPollZ = -1.0;
+              zStableCount = 0;
+              gcodeTriggerUsedInJob = false;
+              activeTriggerMode = "auto";
+
+              if (offlineMode) {
                 sessionId++;
                 preferences.begin("prusalapse", false);
                 preferences.putInt("sessionId", sessionId);
@@ -1511,39 +1591,42 @@ void setup() {
                 } else {
                   sessionStartTimestamp = "";
                 }
-                Serial.printf("Started offline session %d at %s\n", sessionId, sessionStartTimestamp.c_str());
-              } else if (previousPrinterState == "PRINTING" && state != "PRINTING") {
-                if (sdCardAvailable) {
-                  File jsonFile = SD_MMC.open("/lapse/sessions.jsonl", FILE_APPEND);
-                  if (jsonFile) {
-                    String ts = sessionStartTimestamp;
-                    if (ts == "") {
-                      time_t now = time(nullptr);
-                      if (now > 1000000) {
-                        struct tm timeinfo;
-                        gmtime_r(&now, &timeinfo);
-                        char buf[20];
-                        snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d",
-                                 timeinfo.tm_year + 1900,
-                                 timeinfo.tm_mon + 1,
-                                 timeinfo.tm_mday,
-                                 timeinfo.tm_hour,
-                                 timeinfo.tm_min,
-                                 timeinfo.tm_sec);
-                        ts = String(buf);
-                      }
-                    }
-                    if (ts != "") {
-                      jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"timestamp\":\"%s\"}\n", sessionId, offlineFrameCount, ts.c_str());
-                    } else {
-                      jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d}\n", sessionId, offlineFrameCount);
-                    }
-                    jsonFile.close();
-                    Serial.println("Updated sessions.jsonl");
+                Serial.printf("Started offline session %d (job %d) at %s\n", sessionId, currentJobId, sessionStartTimestamp.c_str());
+              }
+            } else if (printSessionActive && state != "PRINTING" && state != "PAUSED" && state != "ATTENTION" && state != "BUSY") {
+              printSessionActive = false;
+              activeTriggerMode = "auto";
 
-                    // Launch background TAR packing task
-                    xTaskCreate(packTarTask, "packTarTask", 4096, (void*)(intptr_t)sessionId, 1, NULL);
+              if (offlineMode && sdCardAvailable) {
+                File jsonFile = SD_MMC.open("/lapse/sessions.jsonl", FILE_APPEND);
+                if (jsonFile) {
+                  String ts = sessionStartTimestamp;
+                  if (ts == "") {
+                    time_t now = time(nullptr);
+                    if (now > 1000000) {
+                      struct tm timeinfo;
+                      gmtime_r(&now, &timeinfo);
+                      char buf[20];
+                      snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d",
+                               timeinfo.tm_year + 1900,
+                               timeinfo.tm_mon + 1,
+                               timeinfo.tm_mday,
+                               timeinfo.tm_hour,
+                               timeinfo.tm_min,
+                               timeinfo.tm_sec);
+                      ts = String(buf);
+                    }
                   }
+                  if (ts != "") {
+                    jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"timestamp\":\"%s\",\"job_id\":%d}\n", sessionId, offlineFrameCount, ts.c_str(), currentJobId);
+                  } else {
+                    jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"job_id\":%d}\n", sessionId, offlineFrameCount, currentJobId);
+                  }
+                  jsonFile.close();
+                  Serial.println("Updated sessions.jsonl");
+
+                  // Launch background TAR packing task
+                  xTaskCreate(packTarTask, "packTarTask", 4096, (void*)(intptr_t)sessionId, 1, NULL);
                 }
               }
             }
@@ -1554,16 +1637,71 @@ void setup() {
             currentZValue = axis_z;
           }
 
-          // MAGIC G-CODE TRIGGER (M220 S99)
+          // =========================================================
+          // HYBRID TIMELAPSE TRIGGER ENGINE
+          // 1. Parked G-Code Trigger (M220 S99 or M221 S99)
+          // 2. Smart Z-Height Trigger (Automatic zero-G-code fallback)
+          // =========================================================
           static bool trigger_active = false;
-          if (state == "PRINTING" && current_speed == 99) {
+          bool isParkedTriggerSignal = (current_speed == 99 || current_flow == 99);
+
+          if (state == "PRINTING" && isParkedTriggerSignal) {
+            gcodeTriggerUsedInJob = true;
+            activeTriggerMode = "gcode";
             if (!trigger_active) {
               trigger_active = true;
-              Serial.println("PrusaLink Polling: MAGIC TRIGGER (Speed 99%) detected! Capturing layer...");
-              if (!capture_in_progress && !sd_write_in_progress) xTaskCreate(captureTask, "captureTask", 4096, NULL, 1, &captureTaskHandle);
+              Serial.printf("PrusaLink Polling: G-CODE TRIGGER (Speed=%d%%, Flow=%d%%) detected! Capturing layer...\n", current_speed, current_flow);
+              if (!capture_in_progress && !sd_write_in_progress) {
+                xTaskCreate(captureTask, "captureTask", 4096, NULL, 1, &captureTaskHandle);
+              }
             }
-          } else if (current_speed != 99) {
-            trigger_active = false;
+          } else {
+            if (!isParkedTriggerSignal) {
+              trigger_active = false;
+            }
+
+            // Smart Z-Height Fallback (when no M220/M221 S99 is used in this print job)
+            if (state == "PRINTING" && !gcodeTriggerUsedInJob && axis_z >= 0.10f && axis_z <= 250.0f) {
+              // Thermal guard: ignore Z movements during MBL / pre-heating before nozzle reaches printing temp
+              // (If target_nozzle < 0, telemetry omitted temp fields e.g. mock test, so allow it)
+              bool nozzleReady = (target_nozzle < 0.0f) || (target_nozzle >= 170.0f && temp_nozzle >= (target_nozzle - 4.0f));
+
+              if (nozzleReady) {
+                if (prevPollZ >= 0.0f && fabs(axis_z - prevPollZ) < 0.015f) {
+                  zStableCount++;
+                } else {
+                  prevPollZ = axis_z;
+                  zStableCount = 1;
+                }
+
+                if (maxConfirmedZ < 0.0f) {
+                  // Initialize baseline Z once stable at first layer (or current layer if booted mid-print)
+                  if (zStableCount >= 3) {
+                    maxConfirmedZ = axis_z;
+                    activeTriggerMode = "smart_z";
+                    Serial.printf("PrusaLink Polling: SMART Z baseline locked at Z=%.2fmm. Capturing initial layer...\n", axis_z);
+                    if (!capture_in_progress && !sd_write_in_progress) {
+                      xTaskCreate(captureTask, "captureTask", 4096, NULL, 1, &captureTaskHandle);
+                    }
+                  }
+                } else {
+                  float deltaZ = axis_z - maxConfirmedZ;
+                  // Standard layer step (0.04mm - 0.24mm): confirm after 3 consecutive stable polls (~0.9s)
+                  // Larger step (0.24mm - 0.60mm, e.g. 0.30mm Z-hop vs 0.30mm thick layer): require 6 stable polls (~1.8s) to reject travel Z-hops
+                  bool confirmedNormalLayer = (deltaZ >= 0.04f && deltaZ <= 0.24f && zStableCount >= 3);
+                  bool confirmedThickLayer  = (deltaZ > 0.24f && deltaZ <= 0.60f && zStableCount >= 6);
+
+                  if (confirmedNormalLayer || confirmedThickLayer) {
+                    maxConfirmedZ = axis_z;
+                    activeTriggerMode = "smart_z";
+                    Serial.printf("PrusaLink Polling: SMART Z-TRIGGER (Z=%.2fmm, +%.2fmm, stable=%d) confirmed! Capturing layer...\n", axis_z, deltaZ, zStableCount);
+                    if (!capture_in_progress && !sd_write_in_progress) {
+                      xTaskCreate(captureTask, "captureTask", 4096, NULL, 1, &captureTaskHandle);
+                    }
+                  }
+                }
+              }
+            }
           }
 
         } else {
