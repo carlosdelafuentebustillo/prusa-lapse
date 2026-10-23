@@ -59,6 +59,8 @@ export default function Home() {
   const [otaFile, setOtaFile] = useState(null);
   const [isUpdatingOta, setIsUpdatingOta] = useState(false);
   const [otaProgress, setOtaProgress] = useState(0);
+  const [latestFirmwareInfo, setLatestFirmwareInfo] = useState(null);
+  const [useCustomOtaFile, setUseCustomOtaFile] = useState(false);
 
   // Toast and Confirmation states
   const [toasts, setToasts] = useState([]);
@@ -77,13 +79,20 @@ export default function Home() {
   };
 
   const handleOtaUpdate = async () => {
-    if (!otaFile || !otaCameraIp) return;
+    if (!otaCameraIp) return;
+    if (useCustomOtaFile && !otaFile) {
+      addToast('Please select a custom .bin firmware file or switch back to latest auto-detected firmware.', 'warning');
+      return;
+    }
     setIsUpdatingOta(true);
     setOtaProgress(0);
-    addToast(`Starting firmware update for ${otaCameraIp}...`, 'info');
+    const verText = (!useCustomOtaFile && latestFirmwareInfo?.version) ? ` (${latestFirmwareInfo.version})` : '';
+    addToast(`Starting firmware update for ${otaCameraIp}${verText}...`, 'info');
 
     const formData = new FormData();
-    formData.append('update', otaFile);
+    if (useCustomOtaFile && otaFile) {
+      formData.append('update', otaFile);
+    }
 
     let currentProgress = 0;
     let fakeProgressInterval = null;
@@ -253,6 +262,16 @@ export default function Home() {
           fetchCameraSettings(cameraIpsStr);
         }
       });
+
+    // Check for latest compiled firmware binary automatically
+    fetch('/api/camera/update')
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.available) {
+          setLatestFirmwareInfo(data);
+        }
+      })
+      .catch(() => {});
       
     // Fetch sessions once
     fetchSessions();
@@ -1181,18 +1200,27 @@ export default function Home() {
 
               {/* OTA Firmware Update */}
               <div className="input-group" style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '20px', marginTop: '20px' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-orange)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="17 8 12 3 7 8" />
-                    <line x1="12" y1="3" x2="12" y2="15" />
-                  </svg>
-                  OTA Firmware Update
-                </label>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', flexWrap: 'wrap', gap: '8px' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-orange)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="17 8 12 3 7 8" />
+                      <line x1="12" y1="3" x2="12" y2="15" />
+                    </svg>
+                    OTA Firmware Update
+                  </label>
+                  {latestFirmwareInfo && latestFirmwareInfo.available && (
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#34D399' }} />
+                      Latest built: <strong style={{ color: 'var(--color-orange)' }}>{latestFirmwareInfo.version}</strong> ({latestFirmwareInfo.sizeFormatted})
+                    </span>
+                  )}
+                </div>
+
                 <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
                   <select 
                     className="text-input" 
-                    style={{ flex: 1, minWidth: '150px' }}
+                    style={{ flex: 1, minWidth: '180px' }}
                     value={otaCameraIp}
                     onChange={(e) => setOtaCameraIp(e.target.value)}
                   >
@@ -1203,20 +1231,54 @@ export default function Home() {
                       </option>
                     ))}
                   </select>
-                  <input 
-                    type="file" 
-                    accept=".bin" 
-                    onChange={(e) => setOtaFile(e.target.files[0])} 
-                    style={{ flex: 2, minWidth: '200px', color: 'var(--text-primary)' }}
-                  />
-                    <button 
-                      className="btn btn-primary"
-                      onClick={handleOtaUpdate}
-                      disabled={!otaFile || !otaCameraIp || isUpdatingOta}
-                      style={{ flex: 1, minWidth: '120px' }}
+
+                  {useCustomOtaFile ? (
+                    <input 
+                      type="file" 
+                      accept=".bin" 
+                      onChange={(e) => setOtaFile(e.target.files[0])} 
+                      style={{ flex: 2, minWidth: '200px', color: 'var(--text-primary)' }}
+                    />
+                  ) : (
+                    <div style={{ flex: 2, minWidth: '200px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '6px', padding: '6px 12px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--text-secondary)' }}>
+                      <span>
+                        Automatic: <strong style={{ color: 'var(--text-primary)' }}>firmware.bin</strong> {latestFirmwareInfo?.version ? `(${latestFirmwareInfo.version})` : ''}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-small"
+                        style={{ padding: '2px 8px', fontSize: '0.7rem' }}
+                        onClick={() => setUseCustomOtaFile(true)}
+                      >
+                        Custom .bin
+                      </button>
+                    </div>
+                  )}
+
+                  {useCustomOtaFile && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-small"
+                      style={{ padding: '6px 10px', fontSize: '0.75rem' }}
+                      onClick={() => {
+                        setUseCustomOtaFile(false);
+                        setOtaFile(null);
+                      }}
                     >
-                      {isUpdatingOta ? `Updating... ${otaProgress}%` : 'Flash Firmware'}
+                      Use Latest
                     </button>
+                  )}
+
+                  <button 
+                    className="btn btn-primary"
+                    onClick={handleOtaUpdate}
+                    disabled={!otaCameraIp || isUpdatingOta || (useCustomOtaFile && !otaFile)}
+                    style={{ flex: 1, minWidth: '140px' }}
+                  >
+                    {isUpdatingOta 
+                      ? `Updating... ${otaProgress}%` 
+                      : (!useCustomOtaFile && latestFirmwareInfo?.version ? `Flash ${latestFirmwareInfo.version}` : 'Flash Firmware')}
+                  </button>
                 </div>
               </div>
             </>
