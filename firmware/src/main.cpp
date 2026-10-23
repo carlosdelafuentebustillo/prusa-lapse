@@ -17,10 +17,12 @@
 String prusaIp = "";
 String prusaApiKey = "";
 String prusaConnectToken = "";
+String prusaConnectFingerprint = "";
+int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 8
-#define FIRMWARE_VERSION "v1.2.0"
+#define FIRMWARE_VERSION "v1.2.1"
 
 bool offlineMode = false;
 bool sdCardAvailable = false;
@@ -70,6 +72,15 @@ void syncConfig() {
   prusaIp = preferences.getString("prusaIp", "");
   prusaApiKey = preferences.getString("prusaApiKey", "");
   prusaConnectToken = preferences.getString("connectToken", "");
+  String customFp = preferences.getString("fingerprint", "");
+  if (customFp.length() >= 16) {
+    prusaConnectFingerprint = customFp;
+  }
+  if (prusaConnectToken.indexOf('*') != -1) {
+    // Clear corrupted token that was saved with asterisks
+    prusaConnectToken = "";
+    preferences.putString("connectToken", "");
+  }
   offlineMode = preferences.getBool("offlineMode", false);
   sessionId = preferences.getInt("sessionId", 0);
   cameraName = preferences.getString("cameraName", "PrusaLapse Camera");
@@ -223,7 +234,6 @@ float currentZValue = -1.0;
 uint32_t lastHeartbeatTime = 0;
 
 // Prusa Connect Cloud Camera Integration
-String prusaConnectFingerprint = "";
 bool prusaConnectInfoSent = false;
 bool pendingOTAUpdate = false;
 #define PREVIEW_CAPTURE_INTERVAL 10000  // Take a VGA preview snapshot every 10 seconds
@@ -445,29 +455,36 @@ void previewAndUploadTask(void *pvParameters) {
     if (WiFi.status() == WL_CONNECTED && !prusaConnectInfoSent && prusaConnectToken.length() > 0 && prusaConnectFingerprint.length() > 0) {
       WiFiClientSecure infoClient;
       infoClient.setInsecure();
-      if (infoClient.connect("webcam.connect.prusa3d.com", 443)) {
-        String jsonPayload = "{\"config\":{\"name\":\"" + cameraName + "\",\"firmware\":\"1.0\",\"manufacturer\":\"PrusaLapse\",\"model\":\"ESP32-CAM\",\"resolution\":{\"width\":640,\"height\":480},\"network_info\":{\"wifi_mac\":\"" + prusaConnectFingerprint + "\",\"wifi_ipv4\":\"" + WiFi.localIP().toString() + "\",\"wifi_ssid\":\"" + WiFi.SSID() + "\"}}}";
+      infoClient.setTimeout(8000);
+      if (infoClient.connect("camera-service.prusa3d.com", 443)) {
+        String jsonPayload = "{\"config\":{\"name\":\"" + cameraName + "\",\"trigger_scheme\":\"TEN_SEC\"},\"device\":{\"type\":\"ESP32\",\"firmware_version\":\"" + String(FIRMWARE_VERSION) + "\",\"hardware_version\":\"ESP32-CAM\"}}";
         
-        infoClient.println("PUT /c/info HTTP/1.1");
-        infoClient.println("Host: webcam.connect.prusa3d.com");
-        infoClient.println("User-Agent: ESP32-CAM-PrusaLapse");
+        infoClient.println("PUT /v1/camera-info HTTP/1.1");
+        infoClient.println("Host: camera-service.prusa3d.com");
+        infoClient.println("User-Agent: ESP32-CAM-PrusaLapse/" + String(FIRMWARE_VERSION));
         infoClient.println("Connection: close");
         infoClient.println("Content-Type: application/json");
-        infoClient.println("fingerprint: " + prusaConnectFingerprint);
-        infoClient.println("token: " + prusaConnectToken);
+        infoClient.println("Fingerprint: " + prusaConnectFingerprint);
+        infoClient.println("Token: " + prusaConnectToken);
         infoClient.println("Content-Length: " + String(jsonPayload.length()));
         infoClient.println();
         infoClient.print(jsonPayload);
         
         unsigned long timeout = millis() + 5000;
+        int code = 0;
         while (infoClient.connected() && millis() < timeout) {
           if (infoClient.available()) {
             String line = infoClient.readStringUntil('\n');
-            if (line.startsWith("HTTP/1.1")) {
-              int code = line.substring(9, 12).toInt();
+            line.trim();
+            if (line.startsWith("HTTP/1.")) {
+              int sp = line.indexOf(' ');
+              if (sp != -1) {
+                code = line.substring(sp + 1, sp + 4).toInt();
+              }
+              last_prusa_connect_code = code;
               if (code >= 200 && code < 300) {
                 prusaConnectInfoSent = true;
-                Serial.println("Prusa Connect: Camera Info registered successfully.");
+                Serial.printf("Prusa Connect: Camera Info registered successfully (HTTP %d).\n", code);
               } else {
                 Serial.printf("Prusa Connect: Info payload failed with code %d\n", code);
               }
@@ -476,9 +493,10 @@ void previewAndUploadTask(void *pvParameters) {
           }
         }
         infoClient.stop();
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        continue; // Let connection close and memory settle; snapshots begin next loop
       } else {
         Serial.println("Prusa Connect: Info client HTTPS connection failed");
+        last_prusa_connect_code = -1;
         infoClient.stop();
       }
     }
@@ -506,15 +524,16 @@ void previewAndUploadTask(void *pvParameters) {
       if (upload_buf && upload_len > 0) {
         WiFiClientSecure client;
         client.setInsecure();
+        client.setTimeout(8000);
 
-        if (client.connect("webcam.connect.prusa3d.com", 443)) {
-          client.println("PUT /c/snapshot HTTP/1.1");
-          client.println("Host: webcam.connect.prusa3d.com");
-          client.println("User-Agent: ESP32-CAM-PrusaLapse");
+        if (client.connect("camera-service.prusa3d.com", 443)) {
+          client.println("PUT /v1/snapshot HTTP/1.1");
+          client.println("Host: camera-service.prusa3d.com");
+          client.println("User-Agent: ESP32-CAM-PrusaLapse/" + String(FIRMWARE_VERSION));
           client.println("Connection: close");
-          client.println("Content-Type: image/jpg");
-          client.println("fingerprint: " + prusaConnectFingerprint);
-          client.println("token: " + prusaConnectToken);
+          client.println("Content-Type: image/jpeg");
+          client.println("Fingerprint: " + prusaConnectFingerprint);
+          client.println("Token: " + prusaConnectToken);
           client.println("Content-Length: " + String(upload_len));
           client.println();
 
@@ -535,8 +554,12 @@ void previewAndUploadTask(void *pvParameters) {
             if (client.available()) {
               String line = client.readStringUntil('\n');
               line.trim();
-              if (line.startsWith("HTTP/1.1")) {
-                httpCode = line.substring(9, 12).toInt();
+              if (line.startsWith("HTTP/1.")) {
+                int sp = line.indexOf(' ');
+                if (sp != -1) {
+                  httpCode = line.substring(sp + 1, sp + 4).toInt();
+                }
+                last_prusa_connect_code = httpCode;
               }
               if (line.length() == 0) {
                 Serial.printf("Prusa Connect upload: %d (%d/%d bytes)\n", httpCode, sent, upload_len);
@@ -547,6 +570,7 @@ void previewAndUploadTask(void *pvParameters) {
           client.stop();
         } else {
           Serial.println("Prusa Connect: HTTPS connection failed");
+          last_prusa_connect_code = -1;
           client.stop();
         }
       }
@@ -865,7 +889,7 @@ void setupWebServer() {
     int status = 400;
     String message = "Invalid parameters";
     
-    if (request->hasArg("var") && (request->hasArg("val") || request->hasArg("token") || request->hasArg("name"))) {
+    if (request->hasArg("var") && (request->hasArg("val") || request->hasArg("token") || request->hasArg("name") || request->hasArg("fingerprint"))) {
       String var = request->arg("var");
       int val = request->hasArg("val") ? request->arg("val").toInt() : 0;
       int res = 0;
@@ -886,11 +910,21 @@ void setupWebServer() {
         message = "OK";
         Serial.printf("Flash LED set: %d\n", val);
       } else if (var == "prusa_connect_token") {
+        String newToken = "";
         if (request->hasArg("token")) {
-          prusaConnectToken = request->arg("token");
+          newToken = request->arg("token");
         } else {
-          prusaConnectToken = request->arg("val");
+          newToken = request->arg("val");
         }
+        newToken.trim();
+        
+        // Prevent saving masked tokens containing asterisks
+        if (newToken.indexOf('*') != -1) {
+          request->send(400, "text/plain", "Invalid token: contains asterisks");
+          return;
+        }
+
+        prusaConnectToken = newToken;
         prusaConnectInfoSent = false; // Reset to re-register info next loop
         
         // Save to NVS
@@ -903,6 +937,34 @@ void setupWebServer() {
         status = 200;
         message = "OK";
         Serial.printf("Prusa Connect token set: %s\n", prusaConnectToken.length() > 0 ? "SET" : "CLEARED");
+      } else if (var == "fingerprint") {
+        String newFp = "";
+        if (request->hasArg("fingerprint")) {
+          newFp = request->arg("fingerprint");
+        } else {
+          newFp = request->arg("val");
+        }
+        newFp.trim();
+        preferences.begin("prusalapse", false);
+        if (newFp.length() >= 16) {
+          prusaConnectFingerprint = newFp;
+          preferences.putString("fingerprint", prusaConnectFingerprint);
+        } else if (newFp.length() == 0) {
+          preferences.remove("fingerprint");
+          uint8_t mac[6];
+          WiFi.macAddress(mac);
+          char fpBuf[64];
+          snprintf(fpBuf, sizeof(fpBuf), "%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+            mac[5], mac[4], mac[3], mac[2], mac[1], mac[0],
+            mac[0] ^ 0xAA, mac[1] ^ 0x55, mac[2] ^ 0xFF, mac[3] ^ 0x42);
+          prusaConnectFingerprint = String(fpBuf);
+        }
+        preferences.end();
+        prusaConnectInfoSent = false;
+        status = 200;
+        message = "OK";
+        Serial.printf("Fingerprint updated: %s\n", prusaConnectFingerprint.c_str());
       } else if (var == "offline") {
         offlineMode = (val == 1);
         if (request->hasArg("prusa_ip")) {
@@ -992,9 +1054,9 @@ void setupWebServer() {
       tokenMasked = "****";
     }
 
-    char json[600];
+    char json[768];
     snprintf(json, sizeof(json), 
-      "{\"brightness\":%d,\"contrast\":%d,\"hmirror\":%d,\"vflip\":%d,\"led\":%d,\"sd_available\":%d,\"offline_mode\":%d,\"prusa_connect_token\":\"%s\",\"prusa_connect_configured\":%d,\"camera_name\":\"%s\",\"firmware_version\":\"%s\"}",
+      "{\"brightness\":%d,\"contrast\":%d,\"hmirror\":%d,\"vflip\":%d,\"led\":%d,\"sd_available\":%d,\"offline_mode\":%d,\"prusa_connect_token\":\"%s\",\"prusa_connect_configured\":%d,\"prusa_connect_code\":%d,\"fingerprint\":\"%s\",\"camera_name\":\"%s\",\"firmware_version\":\"%s\"}",
       s->status.brightness,
       s->status.contrast,
       s->status.hmirror,
@@ -1004,6 +1066,8 @@ void setupWebServer() {
       offlineMode ? 1 : 0,
       tokenMasked.c_str(),
       prusaConnectToken.length() > 0 ? 1 : 0,
+      last_prusa_connect_code,
+      prusaConnectFingerprint.c_str(),
       cameraName.c_str(),
       FIRMWARE_VERSION
     );
@@ -1123,7 +1187,11 @@ void setupWebServer() {
     json += "\"sd_available\":" + String(sdCardAvailable ? 1 : 0) + ",";
     json += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
     json += "\"min_free_heap\":" + String(ESP.getMinFreeHeap()) + ",";
+    json += "\"free_psram\":" + String(psramFound() ? ESP.getFreePsram() : 0) + ",";
     json += "\"last_http_code\":" + String(last_http_code) + ",";
+    json += "\"last_prusa_connect_code\":" + String(last_prusa_connect_code) + ",";
+    json += "\"prusa_connect_info_sent\":" + String(prusaConnectInfoSent ? 1 : 0) + ",";
+    json += "\"fingerprint\":\"" + prusaConnectFingerprint + "\",";
     json += "\"last_z\":" + String(currentZValue) + ",";
     json += "\"camera_name\":\"" + cameraName + "\",";
     json += "\"wifi_rssi\":" + String(WiFi.RSSI()) + ",";
@@ -1320,15 +1388,17 @@ void setup() {
   setupWebServer();
 
 
-  // Generate Prusa Connect fingerprint from MAC address
-  uint8_t mac[6];
-  WiFi.macAddress(mac);
-  char fpBuf[64];
-  snprintf(fpBuf, sizeof(fpBuf), "%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
-    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-    mac[5], mac[4], mac[3], mac[2], mac[1], mac[0],
-    mac[0] ^ 0xAA, mac[1] ^ 0x55, mac[2] ^ 0xFF, mac[3] ^ 0x42);
-  prusaConnectFingerprint = String(fpBuf);
+  // Generate Prusa Connect fingerprint from MAC address if not loaded from NVS
+  if (prusaConnectFingerprint.length() == 0) {
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    char fpBuf[64];
+    snprintf(fpBuf, sizeof(fpBuf), "%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
+      mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+      mac[5], mac[4], mac[3], mac[2], mac[1], mac[0],
+      mac[0] ^ 0xAA, mac[1] ^ 0x55, mac[2] ^ 0xFF, mac[3] ^ 0x42);
+    prusaConnectFingerprint = String(fpBuf);
+  }
   Serial.printf("Prusa Connect Fingerprint: %s\n", prusaConnectFingerprint.c_str());
 
   // Start Prusa Connect upload background task
@@ -1346,7 +1416,7 @@ void setup() {
         
         HTTPClient http;
         http.setReuse(false);
-        http.setTimeout(750);
+        http.setTimeout(2500);
         
         http.begin("http://" + prusaIp + "/api/v1/status");
         http.addHeader("X-Api-Key", prusaApiKey);

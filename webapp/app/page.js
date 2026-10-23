@@ -221,6 +221,8 @@ export default function Home() {
               offline_mode: data.offline_mode ?? 0,
               prusa_connect_configured: data.prusa_connect_configured ?? 0,
               prusa_connect_token: data.prusa_connect_token ?? '',
+              prusa_connect_code: data.prusa_connect_code ?? 0,
+              fingerprint: data.fingerprint ?? '',
               camera_name: data.camera_name ?? 'PrusaLapse Camera',
               firmware_version: data.firmware_version ?? prev[ip]?.firmware_version,
             }
