@@ -59,7 +59,7 @@ function SnapshotImage({ ip, idx }) {
 
 export default function CameraCard({ cleanIp, idx, cameraSettings, updateCameraSetting, getCameraVal, fetchCameraSettings, config, addToast }) {
   const [cameraNameInput, setCameraNameInput] = useState(getCameraVal(cleanIp, 'camera_name', `Camera ${idx + 1}`));
-  const [connectTokenInput, setConnectTokenInput] = useState(getCameraVal(cleanIp, 'prusa_connect_token', ''));
+  const [connectTokenInput, setConnectTokenInput] = useState('');
 
   const hasSettings = cameraSettings[cleanIp] !== undefined;
   const led = getCameraVal(cleanIp, 'led', 0);
@@ -72,10 +72,13 @@ export default function CameraCard({ cleanIp, idx, cameraSettings, updateCameraS
   const firmware_version = getCameraVal(cleanIp, 'firmware_version', null);
   const wifi_rssi = getCameraVal(cleanIp, 'wifi_rssi', null);
   const free_heap = getCameraVal(cleanIp, 'free_heap', null);
+  const prusa_connect_configured = getCameraVal(cleanIp, 'prusa_connect_configured', 0) === 1;
+  const prusa_connect_token = getCameraVal(cleanIp, 'prusa_connect_token', '');
+  const prusa_connect_code = getCameraVal(cleanIp, 'last_prusa_connect_code', getCameraVal(cleanIp, 'prusa_connect_code', 0));
+  const fingerprint = getCameraVal(cleanIp, 'fingerprint', '');
 
   useEffect(() => {
     setCameraNameInput(getCameraVal(cleanIp, 'camera_name', `Camera ${idx + 1}`));
-    setConnectTokenInput(getCameraVal(cleanIp, 'prusa_connect_token', ''));
   }, [cameraSettings, cleanIp, idx]);
 
   return (
@@ -229,22 +232,50 @@ export default function CameraCard({ cleanIp, idx, cameraSettings, updateCameraS
 
         {/* Prusa Connect Token */}
         <div style={{ width: '100%', marginTop: '8px', padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', marginBottom: '6px', opacity: hasSettings ? 0.9 : 0.4 }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-orange)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
-              <polyline points="10 17 15 12 10 7" />
-              <line x1="15" y1="12" x2="3" y2="12" />
-            </svg>
-            Prusa Connect Token
-            {getCameraVal(cleanIp, 'prusa_connect_configured', 0) === 1 && (
-              <span style={{ fontSize: '0.65rem', background: 'var(--color-orange)', color: '#000', padding: '1px 6px', borderRadius: '4px', fontWeight: '600' }}>LINKED</span>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', opacity: hasSettings ? 0.9 : 0.4 }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-orange)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+                <polyline points="10 17 15 12 10 7" />
+                <line x1="15" y1="12" x2="3" y2="12" />
+              </svg>
+              Prusa Connect
+            </label>
+            {prusa_connect_configured && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                {(prusa_connect_code === 200 || prusa_connect_code === 204) && (
+                  <span style={{ fontSize: '0.65rem', background: 'rgba(34,197,94,0.2)', color: '#22c55e', border: '1px solid rgba(34,197,94,0.4)', padding: '1px 6px', borderRadius: '4px', fontWeight: '600' }} title="Snapshot accepted by Prusa Connect">
+                    CONNECTED ({prusa_connect_code})
+                  </span>
+                )}
+                {(prusa_connect_code === 401 || prusa_connect_code === 403) && (
+                  <span style={{ fontSize: '0.65rem', background: 'rgba(239,68,68,0.2)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.4)', padding: '1px 6px', borderRadius: '4px', fontWeight: '600' }} title="Prusa Connect rejected authentication. Re-enter token or check camera in Prusa Connect.">
+                    AUTH ERROR ({prusa_connect_code})
+                  </span>
+                )}
+                {prusa_connect_code === 301 && (
+                  <span style={{ fontSize: '0.65rem', background: 'rgba(245,158,11,0.2)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.4)', padding: '1px 6px', borderRadius: '4px', fontWeight: '600' }} title="Redirect received. Update firmware to v1.2.1.">
+                    REDIRECT (UPDATE FW)
+                  </span>
+                )}
+                {prusa_connect_code === -1 && (
+                  <span style={{ fontSize: '0.65rem', background: 'rgba(245,158,11,0.2)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.4)', padding: '1px 6px', borderRadius: '4px', fontWeight: '600' }} title="Failed to connect to camera-service.prusa3d.com">
+                    TLS ERROR
+                  </span>
+                )}
+                {prusa_connect_code === 0 && (
+                  <span style={{ fontSize: '0.65rem', background: 'rgba(250,104,49,0.2)', color: 'var(--color-orange)', border: '1px solid rgba(250,104,49,0.4)', padding: '1px 6px', borderRadius: '4px', fontWeight: '600' }}>
+                    CONFIGURED
+                  </span>
+                )}
+              </span>
             )}
-          </label>
+          </div>
           <div style={{ display: 'flex', gap: '8px' }}>
             <input
               type="text"
               className="text-input"
-              placeholder="Paste token from Prusa Connect"
+              placeholder={prusa_connect_configured ? `Active (${prusa_connect_token}) - Enter new token to change` : "Paste token from Prusa Connect"}
               value={connectTokenInput}
               onChange={(e) => setConnectTokenInput(e.target.value)}
               style={{ flex: 1, fontSize: '0.8rem', padding: '6px 10px' }}
@@ -255,8 +286,18 @@ export default function CameraCard({ cleanIp, idx, cameraSettings, updateCameraS
               style={{ width: 'auto', padding: '6px 12px', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
               disabled={!hasSettings}
               onClick={async () => {
+                const trimmed = connectTokenInput.trim();
+                if (!trimmed) {
+                  addToast('Please enter a token first', 'error');
+                  return;
+                }
+                if (trimmed.includes('*')) {
+                  addToast('Cannot save masked token with asterisks. Please paste the real token.', 'error');
+                  return;
+                }
                 try {
-                  await fetch(`/api/camera/control?ip=${cleanIp}&var=prusa_connect_token&token=${encodeURIComponent(connectTokenInput)}`);
+                  await fetch(`/api/camera/control?ip=${cleanIp}&var=prusa_connect_token&token=${encodeURIComponent(trimmed)}`);
+                  setConnectTokenInput('');
                   addToast(`Prusa Connect token saved for Camera ${idx + 1}!`, 'success');
                   fetchCameraSettings(config.cameraIps);
                 } catch (e) {
@@ -266,9 +307,47 @@ export default function CameraCard({ cleanIp, idx, cameraSettings, updateCameraS
             >
               Save Token
             </button>
+            {prusa_connect_configured && (
+              <button
+                className="btn btn-secondary btn-small"
+                style={{ width: 'auto', padding: '6px 10px', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
+                disabled={!hasSettings}
+                title="Clear Prusa Connect token"
+                onClick={async () => {
+                  try {
+                    await fetch(`/api/camera/control?ip=${cleanIp}&var=prusa_connect_token&token=`);
+                    setConnectTokenInput('');
+                    addToast(`Prusa Connect token cleared for Camera ${idx + 1}`, 'info');
+                    fetchCameraSettings(config.cameraIps);
+                  } catch (e) {
+                    addToast(`Failed: ${e.message}`, 'error');
+                  }
+                }}
+              >
+                Clear
+              </button>
+            )}
           </div>
+          {fingerprint && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '6px', fontSize: '0.72rem', background: 'rgba(255,255,255,0.03)', padding: '4px 8px', borderRadius: '4px' }}>
+              <span style={{ color: 'var(--text-secondary)' }}>
+                Fingerprint: <code style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{fingerprint}</code>
+              </span>
+              <button
+                type="button"
+                className="btn btn-secondary btn-small"
+                style={{ padding: '2px 8px', fontSize: '0.68rem', width: 'auto' }}
+                onClick={() => {
+                  navigator.clipboard.writeText(fingerprint);
+                  addToast('Fingerprint copied to clipboard!', 'success');
+                }}
+              >
+                Copy
+              </button>
+            </div>
+          )}
           <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '4px', opacity: 0.7 }}>
-            Get this from Prusa Connect → Camera → Add new other camera
+            Get token from Prusa Connect → Camera → Add new other camera
           </div>
         </div>
       </div>

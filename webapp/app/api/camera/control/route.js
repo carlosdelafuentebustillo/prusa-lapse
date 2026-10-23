@@ -7,7 +7,7 @@ export async function GET(request) {
   const variable = searchParams.get('var');
   const value = searchParams.get('val');
 
-  if (!ip || !variable || (value === null && !searchParams.get('token') && !searchParams.get('name'))) {
+  if (!ip || !variable || (value === null && !searchParams.get('token') && !searchParams.get('name') && !searchParams.get('fingerprint'))) {
     return NextResponse.json({ error: 'Missing parameters' }, { status: 400 });
   }
 
@@ -35,6 +35,8 @@ export async function GET(request) {
       } else if (variable === 'prusa_connect_token') {
         const hasToken = searchParams.get('token') && searchParams.get('token').length > 0;
         monitor.log(`Camera ${ip} Prusa Connect token ${hasToken ? 'saved' : 'cleared'}`, 'info');
+      } else if (variable === 'fingerprint') {
+        monitor.log(`Camera ${ip} Prusa Connect fingerprint updated`, 'info');
       } else if (variable === 'offline') {
         const mode = value === '1' ? 'Offline' : 'Online';
         monitor.log(`Camera ${ip} set to ${mode} mode`, 'info');
