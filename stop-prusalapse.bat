@@ -13,7 +13,7 @@ for /f "tokens=5" %%a in ('netstat -aon ^| findstr :3000 ^| findstr LISTENING') 
     set PID=%%a
     if defined PID (
         set FOUND=1
-        echo [INFO] Stopping Prusa-lapse process on port 3000 (PID: !PID!)...
+        echo [INFO] Stopping Prusa-lapse process on port 3000 [PID: !PID!]...
         taskkill /F /PID !PID! >nul 2>nul
         if errorlevel 1 (
             echo [WARN] Could not terminate PID !PID!. It may have already exited.
@@ -31,5 +31,5 @@ if "!FOUND!"=="0" (
 )
 
 echo.
-timeout /t 3 >nul
+ping 127.0.0.1 -n 3 >nul
 exit /b 0
