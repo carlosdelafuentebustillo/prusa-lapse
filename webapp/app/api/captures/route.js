@@ -35,6 +35,8 @@ export async function GET(request) {
     contentType = 'video/mp4';
   } else if (file.endsWith('.jpg') || file.endsWith('.jpeg')) {
     contentType = 'image/jpeg';
+  } else if (file.endsWith('.png')) {
+    contentType = 'image/png';
   }
 
   // Support range requests for video scrubbing/seeking (needed for Chrome/Firefox/Safari players)

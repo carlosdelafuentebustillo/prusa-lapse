@@ -53,6 +53,32 @@ function generateSessionTimestamp(date = new Date()) {
     String(date.getSeconds()).padStart(2, '0');
 }
 
+function parsePrusaFilename(displayName = '') {
+  if (!displayName) return null;
+  const base = displayName.replace(/\.(bgcode|gcode|gco)$/i, '');
+  const nozzleMatch = base.match(/_(\d+(?:\.\d+)?n)(?:_|$)/i);
+  const layerMatch = base.match(/_(\d+(?:\.\d+)?mm)(?:_|$)/i);
+  const materialMatch = base.match(/_(PLA|PETG|ASA|ABS|TPU|FLEX|PC|PVB|PA|HIPS|NYLON|PET|CPE|PP)(?:_|$)/i);
+  const timeMatch = base.match(/_((?:\d+d)?(?:\d+h)?(?:\d+m))$/i);
+
+  let modelName = base;
+  // Strip standard PrusaSlicer suffix starting at nozzle or layer height
+  const suffixIdx = modelName.search(/_(?:\d+(?:\.\d+)?n|\d+(?:\.\d+)?mm)_/i);
+  if (suffixIdx > 0) {
+    modelName = modelName.substring(0, suffixIdx);
+  }
+  modelName = modelName.replace(/_/g, ' ').trim();
+
+  return {
+    displayName,
+    modelName: modelName || base,
+    nozzle: nozzleMatch ? nozzleMatch[1] : null,
+    layerHeight: layerMatch ? layerMatch[1] : null,
+    material: materialMatch ? materialMatch[1].toUpperCase() : null,
+    estimatedTime: timeMatch ? timeMatch[1] : null,
+  };
+}
+
 class MonitorService {
   constructor() {
     this.isRunning = false;
@@ -81,6 +107,85 @@ class MonitorService {
     try {
       const data = await fs.readFile(CONFIG_FILE, 'utf-8');
       return JSON.parse(data);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async syncJobMetadata(sessionDir, expectedJobId = null) {
+    try {
+      if (!sessionDir) return null;
+      const metaPath = path.join(sessionDir, 'meta.json');
+      const thumbPath = path.join(sessionDir, 'thumbnail.png');
+
+      if (existsSync(metaPath) && existsSync(thumbPath)) {
+        try {
+          const existing = JSON.parse(await fs.readFile(metaPath, 'utf-8'));
+          if (existing && existing.modelName) return existing;
+        } catch (e) {}
+      }
+
+      const config = await this.getConfig();
+      if (!config || !config.prusaIp) return null;
+
+      const headers = {};
+      if (config.prusaApiKey) headers['X-Api-Key'] = config.prusaApiKey;
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3500);
+      const res = await fetch(`http://${config.prusaIp}/api/v1/job`, {
+        headers,
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+
+      if (!res.ok || res.status === 204) return null;
+      const jobData = await res.json();
+      if (!jobData || !jobData.file) return null;
+
+      if (expectedJobId && expectedJobId > 0 && jobData.id && jobData.id !== expectedJobId) {
+        return null;
+      }
+
+      const displayName = jobData.file.display_name || jobData.file.name || '';
+      const parsed = parsePrusaFilename(displayName) || { displayName, modelName: displayName };
+      let hasThumbnail = existsSync(thumbPath);
+
+      const thumbRef = jobData.file.refs?.thumbnail || jobData.file.refs?.icon;
+      if (thumbRef && !hasThumbnail) {
+        try {
+          const thumbCtrl = new AbortController();
+          const thumbTimeout = setTimeout(() => thumbCtrl.abort(), 5000);
+          const thumbRes = await fetch(`http://${config.prusaIp}${thumbRef}`, {
+            headers,
+            signal: thumbCtrl.signal
+          });
+          clearTimeout(thumbTimeout);
+          if (thumbRes.ok) {
+            const arr = await thumbRes.arrayBuffer();
+            const buf = Buffer.from(arr);
+            if (buf.length > 100) {
+              await fs.mkdir(sessionDir, { recursive: true });
+              await fs.writeFile(thumbPath, buf);
+              hasThumbnail = true;
+              this.log(`Downloaded print thumbnail (${Math.round(buf.length / 1024)} KB) for "${parsed.modelName}"`, 'success');
+            }
+          }
+        } catch (e) {
+          // Non-fatal if thumbnail fails
+        }
+      }
+
+      const meta = {
+        jobId: jobData.id || null,
+        ...parsed,
+        hasThumbnail,
+        syncedAt: new Date().toISOString()
+      };
+
+      await fs.mkdir(sessionDir, { recursive: true });
+      await fs.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+      return meta;
     } catch (e) {
       return null;
     }
@@ -171,7 +276,12 @@ class MonitorService {
           if (res.ok) {
             const data = await res.json();
             const currentFrameCount = data.frame_count || 0;
-            const lastKnown = this.remoteFrameCounts[ip] || 0;
+            let lastKnown = this.remoteFrameCounts[ip] || 0;
+            if (currentFrameCount < lastKnown) {
+              // Camera started a new session or rebooted and reset its counter
+              lastKnown = 0;
+              this.remoteFrameCounts[ip] = 0;
+            }
 
             if (currentFrameCount > lastKnown) {
               this.log(`Camera ${i} (${ip}) has a new frame! (Local: ${lastKnown}, Remote: ${currentFrameCount})`, 'info');
@@ -192,6 +302,9 @@ class MonitorService {
 
       if (anyNewFrames) {
         this.frameCount++;
+        if (this.currentSession) {
+          await this.syncJobMetadata(path.join(CAPTURES_DIR, this.currentSession));
+        }
       }
 
     } catch (error) {
@@ -282,6 +395,7 @@ class MonitorService {
 
     const sessionDir = path.join(CAPTURES_DIR, this.currentSession);
     await fs.mkdir(sessionDir, { recursive: true });
+    await this.syncJobMetadata(sessionDir);
 
     this.intervalId = setTimeout(() => this.pollCameras(config), 2000);
   }
@@ -511,9 +625,11 @@ class MonitorService {
     
     try {
       await fs.rename(sessionDir, newSessionDir);
+      await this.syncJobMetadata(newSessionDir);
       this.log(`Session is no longer considered offline. Renamed to ${newSessionId}.`, 'info');
       return { success: true, sessionId: newSessionId };
     } catch (renameErr) {
+      await this.syncJobMetadata(sessionDir);
       this.log(`Failed to rename session directory: ${renameErr.message}`, 'warning');
       return { success: true, sessionId }; 
     }
@@ -578,6 +694,8 @@ class MonitorService {
           const items = await fs.readdir(sessionPath, { withFileTypes: true });
           
           let videos = [];
+          let hasThumbnail = false;
+          let meta = null;
           for (const item of items) {
             if (item.isDirectory() && item.name.startsWith('camera_')) {
               const camPath = path.join(sessionPath, item.name);
@@ -589,6 +707,12 @@ class MonitorService {
               });
             } else if (item.isFile() && item.name.endsWith('.mp4')) {
               videos.push(item.name);
+            } else if (item.isFile() && item.name === 'thumbnail.png') {
+              hasThumbnail = true;
+            } else if (item.isFile() && item.name === 'meta.json') {
+              try {
+                meta = JSON.parse(await fs.readFile(path.join(sessionPath, 'meta.json'), 'utf-8'));
+              } catch (e) {}
             }
           }
           
@@ -603,7 +727,9 @@ class MonitorService {
             timestamp,
             isOffline,
             cameras,
-            videos
+            videos,
+            hasThumbnail,
+            meta
           });
         }
       }

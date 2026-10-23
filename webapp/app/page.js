@@ -850,15 +850,39 @@ export default function Home() {
                 const dateObj = parseSessionDate(session.timestamp);
                 return (
                   <div className="session-card expanded" style={{ marginBottom: '20px' }}>
-                    <div className="session-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                      <span className="session-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                        {dateObj ? `${dateObj.monthName} ${dateObj.day}, ${dateObj.year} at ${dateObj.time}` : session.timestamp}
-                        {session.isOffline && session.isRemote && (
-                          <span style={{ fontSize: '0.65rem', background: 'rgba(232,83,63,0.15)', color: 'var(--color-danger)', border: '1px solid rgba(232,83,63,0.3)', padding: '2px 8px', borderRadius: '12px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                            Offline
-                          </span>
+                    <div className="session-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px', gap: '12px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        {session.hasThumbnail && (
+                          <img
+                            src={`/api/captures?session=${session.id}&file=thumbnail.png`}
+                            alt={session.meta?.modelName || 'Print Thumbnail'}
+                            style={{ width: '56px', height: '56px', objectFit: 'contain', borderRadius: '6px', background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.08)', flexShrink: 0 }}
+                          />
                         )}
-                      </span>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                          <span className="session-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                            {session.meta?.modelName ? session.meta.modelName : (dateObj ? `${dateObj.monthName} ${dateObj.day}, ${dateObj.year} at ${dateObj.time}` : session.timestamp)}
+                            {session.meta?.material && (
+                              <span style={{ fontSize: '0.65rem', background: 'rgba(250,104,49,0.15)', color: 'var(--color-orange)', border: '1px solid rgba(250,104,49,0.3)', padding: '1px 6px', borderRadius: '10px', fontWeight: '600' }}>
+                                {session.meta.material}
+                              </span>
+                            )}
+                            {session.meta?.layerHeight && (
+                              <span style={{ fontSize: '0.65rem', background: 'rgba(255,255,255,0.08)', color: 'var(--text-secondary)', padding: '1px 6px', borderRadius: '10px', fontFamily: 'var(--font-mono)' }}>
+                                {session.meta.layerHeight}
+                              </span>
+                            )}
+                            {session.isOffline && session.isRemote && (
+                              <span style={{ fontSize: '0.65rem', background: 'rgba(232,83,63,0.15)', color: 'var(--color-danger)', border: '1px solid rgba(232,83,63,0.3)', padding: '2px 8px', borderRadius: '12px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                                Offline
+                              </span>
+                            )}
+                          </span>
+                          <span className="session-time" style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', opacity: 0.6 }}>
+                            {dateObj ? `${dateObj.monthName} ${dateObj.day}, ${dateObj.year} at ${dateObj.time} · ` : ''}ID: {session.id}
+                          </span>
+                        </div>
+                      </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                         <button 
                           className="btn btn-danger btn-small"
@@ -876,9 +900,6 @@ export default function Home() {
                         </button>
                       </div>
                     </div>
-                    <span className="session-time" style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', opacity: 0.6 }}>
-                    ID: {session.id}
-</span>
                     
                     <div className="session-actions" style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--border-color)' }}>
                       {session.isRemote ? (
@@ -1004,9 +1025,9 @@ export default function Home() {
                               key={sess.id} 
                               className={`session-pill ${sess.isOffline && sess.isRemote ? 'offline' : ''} ${selectedSessionId === sess.id ? 'selected' : ''}`}
                               onClick={() => setSelectedSessionId(prev => prev === sess.id ? null : sess.id)}
-                              title={`Time: ${sObj.time}\nID: ${sess.id}\nCameras: ${sess.cameras.length}`}
+                              title={`${sess.meta?.modelName ? `Model: ${sess.meta.modelName}\n` : ''}Time: ${sObj.time}\nID: ${sess.id}\nCameras: ${sess.cameras.length}`}
                             >
-                              {sObj.time} {sess.isOffline && sess.isRemote ? '(Off)' : ''}
+                              {sObj.time}{sess.meta?.modelName ? ` · ${sess.meta.modelName.slice(0, 10)}` : ''} {sess.isOffline && sess.isRemote ? '(Off)' : ''}
                             </div>
                           );
                         })}

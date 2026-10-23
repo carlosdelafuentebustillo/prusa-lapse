@@ -20,12 +20,12 @@ export default function SlicerPanel() {
   const [config, setConfig] = useState({
     parkX: 240,
     parkY: 210,
-    travelSpeed: 6000,
-    retractDistance: 2.0,
+    travelSpeed: 9000,
+    retractDistance: 0.8,
     retractSpeed: 2100,
     zHopHeight: 0.4,
-    settleTime: 500,
-    captureTime: 2000,
+    settleTime: 300,
+    captureTime: 1200,
     qualityMode: 'balanced',
     triggerSignal: 'm220',
   });
@@ -203,7 +203,8 @@ export default function SlicerPanel() {
                 onChange={handleChange}
                 style={{ width: '100%' }}
               >
-                <option value="m220">PrusaLink (M220 S99)</option>
+                <option value="m220">PrusaLink Speed (M220 S99)</option>
+                <option value="m221">PrusaLink Flow (M221 S99)</option>
                 <option value="gpio0">Hackerboard GPIO (M264 P0 S1)</option>
                 <option value="serial">USB Serial (M118)</option>
               </select>
