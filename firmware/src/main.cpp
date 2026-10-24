@@ -21,8 +21,8 @@ String prusaConnectFingerprint = "";
 int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
-#define VERSION_MINOR 9
-#define FIRMWARE_VERSION "v1.2.2"
+#define VERSION_MINOR 10
+#define FIRMWARE_VERSION "v1.2.3"
 
 bool offlineMode = false;
 bool sdCardAvailable = false;
@@ -285,8 +285,12 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 
 SemaphoreHandle_t camera_mutex = NULL;
 SemaphoreHandle_t snapshot_mutex = NULL;
+SemaphoreHandle_t sd_mutex = NULL;
 SemaphoreHandle_t sd_write_semaphore = NULL;
 bool sd_write_in_progress = false;
+int consecutiveCaptureFailures = 0;
+
+void setupCamera();
 
 // ==========================================
 // CAMERA PIN CONFIGURATION (Ai-Thinker)
@@ -323,9 +327,16 @@ volatile bool capture_in_progress = false;
 // HQ Timelapse Capture (UXGA) — triggered by PrusaLink Z-change or M220 S99
 void captureTask(void *pvParameters) {
     capture_in_progress = true;
-    sensor_t * s = esp_camera_sensor_get();
     
     if (camera_mutex && xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(6000)) == pdTRUE) {
+      sensor_t * s = esp_camera_sensor_get();
+      if (!s) {
+        Serial.println("captureTask: Sensor not initialized, attempting recovery...");
+        esp_camera_deinit();
+        setupCamera();
+        s = esp_camera_sensor_get();
+      }
+
       // Auto Flash (led_state = 2)
       if (led_state == 2) {
         digitalWrite(4, HIGH);
@@ -352,16 +363,24 @@ void captureTask(void *pvParameters) {
         digitalWrite(4, LOW);
       }
       
-      if (!fb || fb->len < 20000) {
+      if (!fb || fb->len < 10000) {
         Serial.println("HQ Capture failed or image too small");
-        // Switch back to VGA before releasing
-        if (s) s->set_framesize(s, FRAMESIZE_VGA);
-        xSemaphoreGive(camera_mutex);
         if (fb) esp_camera_fb_return(fb);
+        consecutiveCaptureFailures++;
+        if (consecutiveCaptureFailures >= 3) {
+          Serial.println("3 consecutive capture failures — power-cycling camera sensor...");
+          esp_camera_deinit();
+          setupCamera();
+          consecutiveCaptureFailures = 0;
+        } else if (s) {
+          s->set_framesize(s, FRAMESIZE_VGA);
+        }
+        xSemaphoreGive(camera_mutex);
         capture_in_progress = false;
         vTaskDelete(NULL);
         return;
       }
+      consecutiveCaptureFailures = 0;
       
       // Store in HQ timelapse buffer (overwritten each capture)
       if (captured_photo_buf) {
@@ -401,10 +420,16 @@ void captureTask(void *pvParameters) {
 
 void takePreviewSnapshot() {
   if (camera_mutex && xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+    sensor_t * s = esp_camera_sensor_get();
+    if (!s) {
+      Serial.println("takePreviewSnapshot: Sensor not found, attempting recovery...");
+      esp_camera_deinit();
+      setupCamera();
+      s = esp_camera_sensor_get();
+    }
     if (led_state == 2) digitalWrite(4, HIGH); // Auto Flash on inside mutex
 
     // Camera should already be at VGA, but ensure it
-    sensor_t * s = esp_camera_sensor_get();
     if (s) s->set_framesize(s, FRAMESIZE_VGA);
     
     if (led_state == 2) vTaskDelay(pdMS_TO_TICKS(150)); // let auto-exposure adjust
@@ -451,22 +476,40 @@ void takePreviewSnapshot() {
 // Every 10s: wake camera → VGA capture → store in snapshot_buf → upload to Prusa Connect → idle
 // ==========================================
 void previewAndUploadTask(void *pvParameters) {
+  int prusaConnectFailures = 0;
+  int backoffCycles = 0;
+
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(PREVIEW_CAPTURE_INTERVAL));
 
-    if (capture_in_progress) {
-      continue; // Don't interfere with HQ timelapse captures
+    if (capture_in_progress || sd_write_in_progress) {
+      continue; // Don't interfere with HQ timelapse captures or SD writes
+    }
+
+    // If printing and Prusa Connect is offline/unconfigured, don't disturb the UXGA sensor every 10s
+    bool wantPrusaConnect = (WiFi.status() == WL_CONNECTED && prusaConnectToken.length() > 0 && prusaConnectFingerprint.length() > 0);
+    if (currentPrinterState == "PRINTING" && (!wantPrusaConnect || prusaConnectFailures >= 2)) {
+      continue;
     }
 
     // --- 1. Take a fresh VGA preview snapshot ---
     takePreviewSnapshot();
 
+    if (!wantPrusaConnect) {
+      continue;
+    }
+
+    if (backoffCycles > 0) {
+      backoffCycles--;
+      continue;
+    }
+
     // --- 2. Prusa Connect: send info payload if not yet registered ---
-    if (WiFi.status() == WL_CONNECTED && !prusaConnectInfoSent && prusaConnectToken.length() > 0 && prusaConnectFingerprint.length() > 0) {
+    if (!prusaConnectInfoSent) {
       WiFiClientSecure infoClient;
       infoClient.setInsecure();
-      infoClient.setTimeout(8000);
-      if (infoClient.connect("camera-service.prusa3d.com", 443)) {
+      infoClient.setTimeout(3);
+      if (infoClient.connect("camera-service.prusa3d.com", 443, 3000)) {
         String jsonPayload = "{\"config\":{\"name\":\"" + cameraName + "\",\"trigger_scheme\":\"TEN_SEC\"},\"device\":{\"type\":\"ESP32\",\"firmware_version\":\"" + String(FIRMWARE_VERSION) + "\",\"hardware_version\":\"ESP32-CAM\"}}";
         
         infoClient.println("PUT /v1/camera-info HTTP/1.1");
@@ -480,7 +523,7 @@ void previewAndUploadTask(void *pvParameters) {
         infoClient.println();
         infoClient.print(jsonPayload);
         
-        unsigned long timeout = millis() + 5000;
+        unsigned long timeout = millis() + 3500;
         int code = 0;
         while (infoClient.connected() && millis() < timeout) {
           if (infoClient.available()) {
@@ -494,20 +537,26 @@ void previewAndUploadTask(void *pvParameters) {
               last_prusa_connect_code = code;
               if (code >= 200 && code < 300) {
                 prusaConnectInfoSent = true;
+                prusaConnectFailures = 0;
                 Serial.printf("Prusa Connect: Camera Info registered successfully (HTTP %d).\n", code);
               } else {
+                prusaConnectFailures++;
                 Serial.printf("Prusa Connect: Info payload failed with code %d\n", code);
               }
               break;
             }
           }
+          vTaskDelay(pdMS_TO_TICKS(10));
         }
         infoClient.stop();
         continue; // Let connection close and memory settle; snapshots begin next loop
       } else {
         Serial.println("Prusa Connect: Info client HTTPS connection failed");
         last_prusa_connect_code = -1;
+        prusaConnectFailures++;
+        if (prusaConnectFailures >= 2) backoffCycles = 5; // Wait ~60s before retrying unreachable cloud
         infoClient.stop();
+        continue;
       }
     }
 
@@ -534,9 +583,9 @@ void previewAndUploadTask(void *pvParameters) {
       if (upload_buf && upload_len > 0) {
         WiFiClientSecure client;
         client.setInsecure();
-        client.setTimeout(8000);
+        client.setTimeout(3);
 
-        if (client.connect("camera-service.prusa3d.com", 443)) {
+        if (client.connect("camera-service.prusa3d.com", 443, 3000)) {
           client.println("PUT /v1/snapshot HTTP/1.1");
           client.println("Host: camera-service.prusa3d.com");
           client.println("User-Agent: ESP32-CAM-PrusaLapse/" + String(FIRMWARE_VERSION));
@@ -558,7 +607,7 @@ void previewAndUploadTask(void *pvParameters) {
             remaining -= toSend;
           }
 
-          unsigned long responseTimeout = millis() + 5000;
+          unsigned long responseTimeout = millis() + 3500;
           int httpCode = 0;
           while (client.connected() && millis() < responseTimeout) {
             if (client.available()) {
@@ -570,17 +619,21 @@ void previewAndUploadTask(void *pvParameters) {
                   httpCode = line.substring(sp + 1, sp + 4).toInt();
                 }
                 last_prusa_connect_code = httpCode;
+                prusaConnectFailures = 0;
               }
               if (line.length() == 0) {
                 Serial.printf("Prusa Connect upload: %d (%d/%d bytes)\n", httpCode, sent, upload_len);
                 break;
               }
             }
+            vTaskDelay(pdMS_TO_TICKS(10));
           }
           client.stop();
         } else {
           Serial.println("Prusa Connect: HTTPS connection failed");
           last_prusa_connect_code = -1;
+          prusaConnectFailures++;
+          if (prusaConnectFailures >= 2) backoffCycles = 5;
           client.stop();
         }
       }
@@ -591,6 +644,13 @@ void previewAndUploadTask(void *pvParameters) {
 }
 
 void setupCamera() {
+  // Power-cycle the OV2640 sensor via PWDN pin (GPIO 32) to recover from warm reboots / brownouts
+  pinMode(PWDN_GPIO_NUM, OUTPUT);
+  digitalWrite(PWDN_GPIO_NUM, HIGH);
+  delay(120);
+  digitalWrite(PWDN_GPIO_NUM, LOW);
+  delay(120);
+
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -623,9 +683,19 @@ void setupCamera() {
     config.fb_count = 1;
   }
   
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    Serial.printf("Camera init failed with error 0x%x", err);
+  esp_err_t err = ESP_FAIL;
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    err = esp_camera_init(&config);
+    if (err == ESP_OK && esp_camera_sensor_get() != NULL) {
+      Serial.printf("Camera initialized successfully on attempt %d.\n", attempt);
+      break;
+    }
+    Serial.printf("Camera init attempt %d failed with error 0x%x. Power-cycling sensor...\n", attempt, err);
+    esp_camera_deinit();
+    digitalWrite(PWDN_GPIO_NUM, HIGH);
+    delay(250);
+    digitalWrite(PWDN_GPIO_NUM, LOW);
+    delay(250);
   }
 
   // Explicitly configure sensor settings and disable color bar/test pattern
@@ -661,6 +731,7 @@ void setupCamera() {
 // ==========================================
 // BACKGROUND TAR PACKING TASK
 // Packs a finished session's JPGs into a single .tar file
+// Uses heap/PSRAM buffers and sd_mutex to prevent stack overflow and FATFS corruption
 // ==========================================
 void packTarTask(void *pvParameters) {
   int sId = (intptr_t)pvParameters;
@@ -669,10 +740,27 @@ void packTarTask(void *pvParameters) {
   
   String tarTmpPath = String("/lapse/") + sessionIdStr + ".tar.tmp";
   String tarPath = String("/lapse/") + sessionIdStr + ".tar";
+  String prefix = String(sessionIdStr) + "_";
   Serial.printf("Background Task: Starting to pack %s\n", tarPath.c_str());
-  
+
+  uint8_t *header = (uint8_t *)(psramFound() ? ps_malloc(512) : malloc(512));
+  uint8_t *buf = (uint8_t *)(psramFound() ? ps_malloc(4096) : malloc(4096));
+  uint8_t *empty = (uint8_t *)(psramFound() ? ps_malloc(1024) : malloc(1024));
+  if (!header || !buf || !empty) {
+    if (header) free(header);
+    if (buf) free(buf);
+    if (empty) free(empty);
+    Serial.println("Background Task: Out of memory for TAR buffers");
+    vTaskDelete(NULL);
+    return;
+  }
+
+  if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
+
   File tarFile = SD_MMC.open(tarTmpPath.c_str(), FILE_WRITE);
   if (!tarFile) {
+    if (sd_mutex) xSemaphoreGive(sd_mutex);
+    free(header); free(buf); free(empty);
     Serial.println("Background Task: Failed to create TAR file");
     vTaskDelete(NULL);
     return;
@@ -681,59 +769,79 @@ void packTarTask(void *pvParameters) {
   File dir = SD_MMC.open("/lapse");
   if (!dir) {
     tarFile.close();
+    if (sd_mutex) xSemaphoreGive(sd_mutex);
+    free(header); free(buf); free(empty);
     vTaskDelete(NULL);
     return;
   }
   
-  File file = dir.openNextFile();
-  while(file) {
-    String filename = file.name();
-    if(!file.isDirectory() && filename.startsWith(String(sessionIdStr) + "_") && filename.endsWith(".jpg")) {
-      uint8_t header[512] = {0};
-      strncpy((char*)header, filename.c_str(), 99);
-      strcpy((char*)header + 100, "0000644");
-      strcpy((char*)header + 108, "0000000");
-      strcpy((char*)header + 116, "0000000");
-      
-      size_t filesize = file.size();
-      snprintf((char*)header + 124, 12, "%011o", filesize);
-      strcpy((char*)header + 136, "00000000000");
-      header[156] = '0';
-      
-      strcpy((char*)header + 257, "ustar");
-      header[262] = ' ';
-      strcpy((char*)header + 263, " ");
-      
-      memset((char*)header + 148, ' ', 8);
-      unsigned int checksum = 0;
-      for (int i = 0; i < 512; i++) checksum += header[i];
-      snprintf((char*)header + 148, 8, "%06o", checksum);
-      
-      tarFile.write(header, 512);
-      
-      uint8_t buf[512];
-      size_t remaining = filesize;
-      while(remaining > 0) {
-        size_t toRead = remaining > 512 ? 512 : remaining;
-        file.read(buf, toRead);
-        tarFile.write(buf, toRead);
-        if(toRead < 512) {
-          memset(buf + toRead, 0, 512 - toRead);
-          tarFile.write(buf + toRead, 512 - toRead);
+  bool isDir = false;
+  String nextPath = dir.getNextFileName(&isDir);
+  while (nextPath.length() > 0) {
+    String filename = nextPath;
+    int lastSlash = filename.lastIndexOf('/');
+    if (lastSlash != -1) filename = filename.substring(lastSlash + 1);
+
+    if (!isDir && filename.startsWith(prefix) && filename.endsWith(".jpg")) {
+      String fullFilePath = String("/lapse/") + filename;
+      File file = SD_MMC.open(fullFilePath.c_str(), FILE_READ);
+      if (file) {
+        memset(header, 0, 512);
+        strncpy((char*)header, filename.c_str(), 99);
+        strcpy((char*)header + 100, "0000644");
+        strcpy((char*)header + 108, "0000000");
+        strcpy((char*)header + 116, "0000000");
+        
+        size_t filesize = file.size();
+        snprintf((char*)header + 124, 12, "%011o", (unsigned int)filesize);
+        strcpy((char*)header + 136, "00000000000");
+        header[156] = '0';
+        
+        strcpy((char*)header + 257, "ustar");
+        header[262] = ' ';
+        strcpy((char*)header + 263, " ");
+        
+        memset((char*)header + 148, ' ', 8);
+        unsigned int checksum = 0;
+        for (int i = 0; i < 512; i++) checksum += header[i];
+        snprintf((char*)header + 148, 8, "%06o", checksum);
+        
+        tarFile.write(header, 512);
+        
+        size_t remaining = filesize;
+        while (remaining > 0) {
+          size_t toRead = remaining > 4096 ? 4096 : remaining;
+          size_t bytesRead = file.read(buf, toRead);
+          if (bytesRead == 0) break;
+          tarFile.write(buf, bytesRead);
+          size_t mod512 = bytesRead % 512;
+          if (mod512 != 0) {
+            size_t pad = 512 - mod512;
+            memset(buf, 0, pad);
+            tarFile.write(buf, pad);
+          }
+          remaining -= bytesRead;
+          vTaskDelay(pdMS_TO_TICKS(1)); // feed watchdog
         }
-        remaining -= toRead;
-        vTaskDelay(pdMS_TO_TICKS(2)); // feed watchdog
+        file.close();
       }
-      Serial.printf("Packed %s\n", filename.c_str());
     }
-    file = dir.openNextFile();
+    nextPath = dir.getNextFileName(&isDir);
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
+  dir.close();
   
-  uint8_t empty[1024] = {0};
+  memset(empty, 0, 1024);
   tarFile.write(empty, 1024);
   tarFile.close();
   
+  if (SD_MMC.exists(tarPath.c_str())) {
+    SD_MMC.remove(tarPath.c_str());
+  }
   SD_MMC.rename(tarTmpPath.c_str(), tarPath.c_str());
+
+  if (sd_mutex) xSemaphoreGive(sd_mutex);
+  free(header); free(buf); free(empty);
   
   Serial.printf("Background Task: Finished packing %s\n", tarPath.c_str());
   vTaskDelete(NULL);
@@ -754,6 +862,7 @@ void sdWriteTask(void *pvParameters) {
         } else {
           snprintf(filename, sizeof(filename), "/lapse/frame_%04d.jpg", offlineFrameCount);
         }
+        if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
         File file = SD_MMC.open(filename, FILE_WRITE);
         if (file) {
           file.write(captured_photo_buf, captured_photo_len);
@@ -763,6 +872,7 @@ void sdWriteTask(void *pvParameters) {
         } else {
           Serial.printf("Background Task: Failed to save to SD: %s\n", filename);
         }
+        if (sd_mutex) xSemaphoreGive(sd_mutex);
       } else if (!sdCardAvailable) {
         // If no SD card is present, we still increment the frame count!
         // This alerts the webapp's new RAM fetcher loop to download the photo via /saved-photo.jpg
@@ -824,7 +934,7 @@ void setupWebServer() {
       return;
     }
     // Run the capture on core 1 so it doesn't block the AsyncTCP thread
-    xTaskCreate(captureTask, "captureTask", 4096, NULL, 1, &captureTaskHandle);
+    xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
     request->send(200, "text/plain", "Capture Started");
   });
 
@@ -1051,10 +1161,6 @@ void setupWebServer() {
   // 5. Get current camera status
   server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
     sensor_t * s = esp_camera_sensor_get();
-    if (!s) {
-      request->send(500, "text/plain", "Sensor not found");
-      return;
-    }
     
     // Build JSON with Prusa Connect token (masked for security)
     String tokenMasked = "";
@@ -1066,11 +1172,11 @@ void setupWebServer() {
 
     char json[768];
     snprintf(json, sizeof(json), 
-      "{\"brightness\":%d,\"contrast\":%d,\"hmirror\":%d,\"vflip\":%d,\"led\":%d,\"sd_available\":%d,\"offline_mode\":%d,\"prusa_connect_token\":\"%s\",\"prusa_connect_configured\":%d,\"prusa_connect_code\":%d,\"fingerprint\":\"%s\",\"camera_name\":\"%s\",\"firmware_version\":\"%s\"}",
-      s->status.brightness,
-      s->status.contrast,
-      s->status.hmirror,
-      s->status.vflip,
+      "{\"brightness\":%d,\"contrast\":%d,\"hmirror\":%d,\"vflip\":%d,\"led\":%d,\"sd_available\":%d,\"offline_mode\":%d,\"prusa_connect_token\":\"%s\",\"prusa_connect_configured\":%d,\"prusa_connect_code\":%d,\"fingerprint\":\"%s\",\"camera_name\":\"%s\",\"firmware_version\":\"%s\",\"sensor_ok\":%d}",
+      s ? s->status.brightness : brightnessVal,
+      s ? s->status.contrast : contrastVal,
+      s ? s->status.hmirror : hmirrorVal,
+      s ? s->status.vflip : vflipVal,
       led_state,
       sdCardAvailable ? 1 : 0,
       offlineMode ? 1 : 0,
@@ -1079,7 +1185,8 @@ void setupWebServer() {
       last_prusa_connect_code,
       prusaConnectFingerprint.c_str(),
       cameraName.c_str(),
-      FIRMWARE_VERSION
+      FIRMWARE_VERSION,
+      s ? 1 : 0
     );
     
     request->send(200, "application/json", json);
@@ -1088,9 +1195,11 @@ void setupWebServer() {
   // 6. SD Card Endpoints
   server.on("/list_sd", HTTP_GET, [](AsyncWebServerRequest *request){
     if (!sdCardAvailable) { request->send(503, "text/plain", "SD Card not available"); return; }
+    if (sd_mutex && xSemaphoreTake(sd_mutex, pdMS_TO_TICKS(3000)) != pdTRUE) {
+      request->send(503, "text/plain", "SD Card busy");
+      return;
+    }
     
-    // Allocate a large temporary buffer to build the JSON string
-    // This avoids String fragmentation from looping `out += "..."`
     size_t bufSize = 32768; // 32KB can hold ~1000 filenames
     char *outBuf = NULL;
     if (psramFound()) {
@@ -1098,34 +1207,40 @@ void setupWebServer() {
     } else {
       outBuf = (char *)malloc(bufSize);
     }
-    if (!outBuf) { request->send(500, "text/plain", "Out of memory"); return; }
+    if (!outBuf) {
+      if (sd_mutex) xSemaphoreGive(sd_mutex);
+      request->send(500, "text/plain", "Out of memory");
+      return;
+    }
     
     File dir = SD_MMC.open("/lapse");
     strcpy(outBuf, "[");
     size_t len = 1;
     bool first = true;
     
-    File file = dir.openNextFile();
-    while(file) {
-      String filepath = String(file.name());
-      file.close();
-      
-      if (len + filepath.length() + 5 >= bufSize) break;
-      
-      if (!first) { outBuf[len++] = ','; }
-      outBuf[len++] = '"';
-      strcpy(outBuf + len, filepath.c_str());
-      len += filepath.length();
-      outBuf[len++] = '"';
-      first = false;
-      
-      file = dir.openNextFile();
-      vTaskDelay(pdMS_TO_TICKS(2)); // Feed watchdog
+    if (dir) {
+      bool isDir = false;
+      String filepath = dir.getNextFileName(&isDir);
+      while (filepath.length() > 0) {
+        if (!isDir) {
+          int lastSlash = filepath.lastIndexOf('/');
+          if (lastSlash != -1) filepath = filepath.substring(lastSlash + 1);
+          if (len + filepath.length() + 5 >= bufSize) break;
+          if (!first) { outBuf[len++] = ','; }
+          outBuf[len++] = '"';
+          strcpy(outBuf + len, filepath.c_str());
+          len += filepath.length();
+          outBuf[len++] = '"';
+          first = false;
+        }
+        filepath = dir.getNextFileName(&isDir);
+      }
+      dir.close();
     }
+    if (sd_mutex) xSemaphoreGive(sd_mutex);
     outBuf[len++] = ']';
     outBuf[len] = '\0';
     
-    // Copy into a String and free the buffer, then send
     String finalJson = String(outBuf);
     free(outBuf);
     request->send(200, "application/json", finalJson);
@@ -1220,39 +1335,56 @@ void setupWebServer() {
     if (!sdCardAvailable) { request->send(503, "text/plain", "SD Card not available"); return; }
     if (!request->hasArg("session")) { request->send(400, "text/plain", "Missing session parameter"); return; }
     String sessionParam = request->arg("session"); // e.g. "s0001"
-    
-    // Delete jpg files
-    File dir = SD_MMC.open("/lapse");
-    File file = dir.openNextFile();
-    while(file) {
-      String filepath = String(file.name());
-      file.close();
-      if (filepath.indexOf(sessionParam + "_") != -1) {
-        if(!filepath.startsWith("/")) filepath = "/" + filepath;
-        if(!filepath.startsWith("/lapse/")) filepath = "/lapse/" + filepath;
-        SD_MMC.remove(filepath);
-      }
-      file = dir.openNextFile();
-      vTaskDelay(pdMS_TO_TICKS(2));
-    }
-    
-    // Read sessions.jsonl and filter
-    File jsonFile = SD_MMC.open("/lapse/sessions.jsonl", FILE_READ);
-    if (jsonFile) {
-      String newContent = "";
-      while (jsonFile.available()) {
-        String line = jsonFile.readStringUntil('\n');
-        if (line.indexOf("\"session\":\"" + sessionParam + "\"") == -1 && line.length() > 0) {
-          newContent += line + "\n";
+    if (sd_mutex && xSemaphoreTake(sd_mutex, pdMS_TO_TICKS(3000)) == pdTRUE) {
+      // Immediately update sessions.jsonl so the session disappears from the queue right away
+      File jsonFile = SD_MMC.open("/lapse/sessions.jsonl", FILE_READ);
+      if (jsonFile) {
+        String newContent = "";
+        while (jsonFile.available()) {
+          String line = jsonFile.readStringUntil('\n');
+          if (line.indexOf("\"session\":\"" + sessionParam + "\"") == -1 && line.length() > 0) {
+            newContent += line + "\n";
+          }
+        }
+        jsonFile.close();
+        
+        File outFile = SD_MMC.open("/lapse/sessions.jsonl", FILE_WRITE);
+        if (outFile) {
+          outFile.print(newContent);
+          outFile.close();
         }
       }
-      jsonFile.close();
-      
-      File outFile = SD_MMC.open("/lapse/sessions.jsonl", FILE_WRITE);
-      if (outFile) {
-        outFile.print(newContent);
-        outFile.close();
-      }
+      xSemaphoreGive(sd_mutex);
+    }
+
+    // Delete jpg and tar files asynchronously in a background task so AsyncTCP never blocks or resets
+    char *sessArg = (char *)malloc(32);
+    if (sessArg) {
+      strncpy(sessArg, sessionParam.c_str(), 31);
+      sessArg[31] = '\0';
+      xTaskCreatePinnedToCore([](void *param) {
+        String sess = String((char *)param);
+        free(param);
+        if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
+        File dir = SD_MMC.open("/lapse");
+        if (dir) {
+          bool isDir = false;
+          String filepath = dir.getNextFileName(&isDir);
+          while (filepath.length() > 0) {
+            if (!isDir && (filepath.indexOf(sess + "_") != -1 || filepath.endsWith("/" + sess + ".tar"))) {
+              if (!filepath.startsWith("/")) filepath = "/" + filepath;
+              if (!filepath.startsWith("/lapse/")) filepath = "/lapse/" + filepath;
+              SD_MMC.remove(filepath);
+              vTaskDelay(pdMS_TO_TICKS(2));
+            }
+            filepath = dir.getNextFileName(&isDir);
+          }
+          dir.close();
+        }
+        if (sd_mutex) xSemaphoreGive(sd_mutex);
+        Serial.printf("Background Task: Deleted session %s from SD\n", sess.c_str());
+        vTaskDelete(NULL);
+      }, "delSessTask", 8192, sessArg, 1, NULL, 1);
     }
     
     request->send(200, "text/plain", "Session " + sessionParam + " deleted");
@@ -1260,30 +1392,56 @@ void setupWebServer() {
 
   server.on("/wipe_sd", HTTP_GET, [](AsyncWebServerRequest *request){
     if (!sdCardAvailable) { request->send(503, "text/plain", "SD Card not available"); return; }
-    File dir = SD_MMC.open("/lapse");
-    File file = dir.openNextFile();
-    while(file) {
-      String filepath = String(file.name());
-      if(!filepath.startsWith("/")) filepath = "/" + filepath; // ensure leading slash
-      if(!filepath.startsWith("/lapse/")) filepath = "/lapse/" + filepath;
-      
-      file.close(); // MUST close file handle before deleting!
-      SD_MMC.remove(filepath);
-      
-      file = dir.openNextFile();
-      vTaskDelay(pdMS_TO_TICKS(2)); // Feed watchdog
-    }
     offlineFrameCount = 0;
     sessionId = 0;
     preferences.begin("prusalapse", false);
     preferences.putInt("sessionId", 0);
     preferences.end();
+
+    if (sd_mutex && xSemaphoreTake(sd_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+      SD_MMC.remove("/lapse/sessions.jsonl");
+      xSemaphoreGive(sd_mutex);
+    }
+
+    // Delete all files in /lapse asynchronously in a background task so AsyncTCP never times out
+    xTaskCreatePinnedToCore([](void *param) {
+      if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
+      File dir = SD_MMC.open("/lapse");
+      if (dir) {
+        bool isDir = false;
+        String filepath = dir.getNextFileName(&isDir);
+        while (filepath.length() > 0) {
+          if (!isDir) {
+            if (!filepath.startsWith("/")) filepath = "/" + filepath;
+            if (!filepath.startsWith("/lapse/")) filepath = "/lapse/" + filepath;
+            SD_MMC.remove(filepath);
+            vTaskDelay(pdMS_TO_TICKS(2));
+          }
+          filepath = dir.getNextFileName(&isDir);
+        }
+        dir.close();
+      }
+      if (sd_mutex) xSemaphoreGive(sd_mutex);
+      Serial.println("Background Task: SD Card /lapse wipe complete");
+      vTaskDelete(NULL);
+    }, "wipeSdTask", 8192, NULL, 1, NULL, 1);
+
     request->send(200, "text/plain", "SD Card Wiped");
   });
 
   // Simple homepage
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     request->send(200, "text/html", "<h1>PrusaLapse Camera</h1><p>API is active.</p><ul><li><a href='/snapshot.jpg'>VGA Snapshot</a></li><li><a href='/action_capture'>Trigger Capture</a></li><li><a href='/saved-photo.jpg'>View Saved Photo</a></li><li><a href='/status'>Status JSON</a></li><li><a href='/camera_status'>Diagnostics JSON</a></li><li><a href='/list_sd'>List SD JSON</a></li></ul>");
+  });
+
+  // Remote reboot endpoint
+  server.on("/reboot", HTTP_GET, [](AsyncWebServerRequest *request) {
+    AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", "Rebooting");
+    response->addHeader("Connection", "close");
+    response->addHeader("Access-Control-Allow-Origin", "*");
+    request->send(response);
+    extern bool pendingOTAUpdate;
+    pendingOTAUpdate = true;
   });
 
   // OTA Update endpoint
@@ -1311,6 +1469,9 @@ void setupWebServer() {
       if (captureTaskHandle != NULL) vTaskSuspend(captureTaskHandle);
       if (prusaLinkTaskHandle != NULL) vTaskSuspend(prusaLinkTaskHandle);
       
+      if (Update.isRunning()) {
+        Update.abort();
+      }
       if (!Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000)) {
         Update.printError(Serial);
       }
@@ -1356,7 +1517,6 @@ void setupWiFi() {
       Serial.println(WiFi.localIP());
       WiFi.setSleep(false); // Disable WiFi sleep to reduce latency and prevent disconnections
       WiFi.setTxPower(WIFI_POWER_15dBm); // Reduce TX power to limit current draw and avoid power brownouts/stalls
-      led_state = 0;
     }
   }
 }
@@ -1386,9 +1546,10 @@ void setup() {
 
   camera_mutex = xSemaphoreCreateMutex();
   snapshot_mutex = xSemaphoreCreateMutex();
+  sd_mutex = xSemaphoreCreateMutex();
   
   sd_write_semaphore = xSemaphoreCreateBinary();
-  xTaskCreatePinnedToCore(sdWriteTask, "sdWriteTask", 4096, NULL, 1, &sdWriteTaskHandle, 1);
+  xTaskCreatePinnedToCore(sdWriteTask, "sdWriteTask", 8192, NULL, 1, &sdWriteTaskHandle, 1);
   
   // Flash LED off
   pinMode(4, OUTPUT);
@@ -1570,11 +1731,60 @@ void setup() {
               activeTriggerMode = "auto";
 
               if (offlineMode) {
-                sessionId++;
-                preferences.begin("prusalapse", false);
-                preferences.putInt("sessionId", sessionId);
-                preferences.end();
-                offlineFrameCount = 0;
+                // Check if current sessionId on SD card was left open (unfinalized in sessions.jsonl) due to a mid-print reboot
+                bool resumeExistingSession = false;
+                int existingFrames = 0;
+                if (sdCardAvailable && sessionId > 0) {
+                  char curSessTag[24];
+                  snprintf(curSessTag, sizeof(curSessTag), "\"session\":\"s%04d\"", sessionId);
+                  char curPrefix[16];
+                  snprintf(curPrefix, sizeof(curPrefix), "s%04d_f", sessionId);
+
+                  if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
+                  bool finalizedInJsonl = false;
+                  File jf = SD_MMC.open("/lapse/sessions.jsonl", FILE_READ);
+                  if (jf) {
+                    while (jf.available()) {
+                      String line = jf.readStringUntil('\n');
+                      if (line.indexOf(curSessTag) != -1) {
+                        finalizedInJsonl = true;
+                        break;
+                      }
+                    }
+                    jf.close();
+                  }
+
+                  if (!finalizedInJsonl) {
+                    resumeExistingSession = true;
+                    File dir = SD_MMC.open("/lapse");
+                    if (dir) {
+                      bool isDir = false;
+                      String fn = dir.getNextFileName(&isDir);
+                      while (fn.length() > 0) {
+                        int ls = fn.lastIndexOf('/');
+                        if (ls != -1) fn = fn.substring(ls + 1);
+                        if (!isDir && fn.startsWith(curPrefix) && fn.endsWith(".jpg")) {
+                          existingFrames++;
+                        }
+                        fn = dir.getNextFileName(&isDir);
+                      }
+                      dir.close();
+                    }
+                  }
+                  if (sd_mutex) xSemaphoreGive(sd_mutex);
+                }
+
+                if (resumeExistingSession) {
+                  offlineFrameCount = existingFrames;
+                  Serial.printf("Resuming unfinalized offline session s%04d at frame %d (job %d)\n", sessionId, offlineFrameCount, currentJobId);
+                } else {
+                  sessionId++;
+                  preferences.begin("prusalapse", false);
+                  preferences.putInt("sessionId", sessionId);
+                  preferences.end();
+                  offlineFrameCount = 0;
+                }
+
                 time_t now = time(nullptr);
                 if (now > 1000000) {
                   struct tm timeinfo;
@@ -1591,13 +1801,14 @@ void setup() {
                 } else {
                   sessionStartTimestamp = "";
                 }
-                Serial.printf("Started offline session %d (job %d) at %s\n", sessionId, currentJobId, sessionStartTimestamp.c_str());
+                Serial.printf("Active offline session s%04d (job %d, startFrame %d) at %s\n", sessionId, currentJobId, offlineFrameCount, sessionStartTimestamp.c_str());
               }
             } else if (printSessionActive && state != "PRINTING" && state != "PAUSED" && state != "ATTENTION" && state != "BUSY") {
               printSessionActive = false;
               activeTriggerMode = "auto";
 
-              if (offlineMode && sdCardAvailable) {
+              if (offlineMode && sdCardAvailable && offlineFrameCount > 0) {
+                if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
                 File jsonFile = SD_MMC.open("/lapse/sessions.jsonl", FILE_APPEND);
                 if (jsonFile) {
                   String ts = sessionStartTimestamp;
@@ -1623,10 +1834,13 @@ void setup() {
                     jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"job_id\":%d}\n", sessionId, offlineFrameCount, currentJobId);
                   }
                   jsonFile.close();
+                  if (sd_mutex) xSemaphoreGive(sd_mutex);
                   Serial.println("Updated sessions.jsonl");
 
-                  // Launch background TAR packing task
-                  xTaskCreate(packTarTask, "packTarTask", 4096, (void*)(intptr_t)sessionId, 1, NULL);
+                  // Launch background TAR packing task with 8192-byte stack
+                  xTaskCreate(packTarTask, "packTarTask", 8192, (void*)(intptr_t)sessionId, 1, NULL);
+                } else {
+                  if (sd_mutex) xSemaphoreGive(sd_mutex);
                 }
               }
             }
@@ -1652,7 +1866,7 @@ void setup() {
               trigger_active = true;
               Serial.printf("PrusaLink Polling: G-CODE TRIGGER (Speed=%d%%, Flow=%d%%) detected! Capturing layer...\n", current_speed, current_flow);
               if (!capture_in_progress && !sd_write_in_progress) {
-                xTaskCreate(captureTask, "captureTask", 4096, NULL, 1, &captureTaskHandle);
+                xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
               }
             }
           } else {
@@ -1681,7 +1895,7 @@ void setup() {
                     activeTriggerMode = "smart_z";
                     Serial.printf("PrusaLink Polling: SMART Z baseline locked at Z=%.2fmm. Capturing initial layer...\n", axis_z);
                     if (!capture_in_progress && !sd_write_in_progress) {
-                      xTaskCreate(captureTask, "captureTask", 4096, NULL, 1, &captureTaskHandle);
+                      xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
                     }
                   }
                 } else {
@@ -1696,7 +1910,7 @@ void setup() {
                     activeTriggerMode = "smart_z";
                     Serial.printf("PrusaLink Polling: SMART Z-TRIGGER (Z=%.2fmm, +%.2fmm, stable=%d) confirmed! Capturing layer...\n", axis_z, deltaZ, zStableCount);
                     if (!capture_in_progress && !sd_write_in_progress) {
-                      xTaskCreate(captureTask, "captureTask", 4096, NULL, 1, &captureTaskHandle);
+                      xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
                     }
                   }
                 }
@@ -1706,8 +1920,9 @@ void setup() {
 
         } else {
           // HTTP connection failed, timed out, or returned an error.
-          pollInterval = 15000;
-          Serial.printf("PrusaLink poll failed (code %d). Throttling poll to 15s.\n", httpCode);
+          // If a print is active, retry after 1s instead of 15s so we never miss layer triggers!
+          pollInterval = (previousPrinterState == "PRINTING") ? 1000 : 10000;
+          Serial.printf("PrusaLink poll failed (code %d). Next poll in %dms.\n", httpCode, pollInterval);
         }
         http.end();
       }
@@ -1772,7 +1987,7 @@ void loop() {
     hardware_trigger_flag = false;
     Serial.println("Hardware Trigger (GPIO/Serial) detected! Capturing layer...");
     if (!capture_in_progress && !sd_write_in_progress) {
-      xTaskCreate(captureTask, "captureTask", 4096, NULL, 1, &captureTaskHandle);
+      xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
     }
   }
 
