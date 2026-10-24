@@ -112,47 +112,119 @@ class MonitorService {
     }
   }
 
-  async syncJobMetadata(sessionDir, expectedJobId = null) {
+  async syncJobMetadata(sessionDir, expectedJobId = null, fallbackJobName = null, sessionTimestamp = null) {
     try {
       if (!sessionDir) return null;
       const metaPath = path.join(sessionDir, 'meta.json');
       const thumbPath = path.join(sessionDir, 'thumbnail.png');
 
-      if (existsSync(metaPath) && existsSync(thumbPath)) {
+      let existingMeta = null;
+      if (existsSync(metaPath)) {
         try {
-          const existing = JSON.parse(await fs.readFile(metaPath, 'utf-8'));
-          if (existing && existing.modelName) return existing;
+          existingMeta = JSON.parse(await fs.readFile(metaPath, 'utf-8'));
+          if (existingMeta && existingMeta.modelName && existsSync(thumbPath)) return existingMeta;
         } catch (e) {}
       }
 
       const config = await this.getConfig();
-      if (!config || !config.prusaIp) return null;
-
       const headers = {};
-      if (config.prusaApiKey) headers['X-Api-Key'] = config.prusaApiKey;
+      if (config && config.prusaApiKey) headers['X-Api-Key'] = config.prusaApiKey;
 
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
-      const res = await fetch(`http://${config.prusaIp}/api/v1/job`, {
-        headers,
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
+      let displayName = fallbackJobName || existingMeta?.displayName || '';
+      let thumbRef = null;
+      let resolvedJobId = expectedJobId || existingMeta?.jobId || null;
 
-      if (!res.ok || res.status === 204) return null;
-      const jobData = await res.json();
-      if (!jobData || !jobData.file) return null;
+      // 1. Try active /api/v1/job first
+      if (config && config.prusaIp) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 3000);
+          const res = await fetch(`http://${config.prusaIp}/api/v1/job`, {
+            headers,
+            signal: controller.signal
+          });
+          clearTimeout(timeout);
 
-      if (expectedJobId && expectedJobId > 0 && jobData.id && jobData.id !== expectedJobId) {
-        return null;
+          if (res.ok && res.status !== 204) {
+            const jobData = await res.json();
+            if (jobData && jobData.file) {
+              if (!expectedJobId || !jobData.id || jobData.id === expectedJobId) {
+                displayName = jobData.file.display_name || jobData.file.name || displayName;
+                thumbRef = jobData.file.refs?.thumbnail || jobData.file.refs?.icon || null;
+                resolvedJobId = jobData.id || resolvedJobId;
+              }
+            }
+          }
+        } catch (e) {}
       }
 
-      const displayName = jobData.file.display_name || jobData.file.name || '';
-      const parsed = parsePrusaFilename(displayName) || { displayName, modelName: displayName };
-      let hasThumbnail = existsSync(thumbPath);
+      // 2. Fallback to /api/v1/files/usb if print already finished (/api/v1/job returned 204)
+      if (config && config.prusaIp && (!displayName || !thumbRef)) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 3500);
+          const filesRes = await fetch(`http://${config.prusaIp}/api/v1/files/usb`, {
+            headers,
+            signal: controller.signal
+          });
+          clearTimeout(timeout);
 
-      const thumbRef = jobData.file.refs?.thumbnail || jobData.file.refs?.icon;
-      if (thumbRef && !hasThumbnail) {
+          if (filesRes.ok) {
+            const usbData = await filesRes.json();
+            const printFiles = (usbData.children || []).filter(c => c.type === 'PRINT_FILE');
+            let matchedFile = null;
+
+            if (displayName) {
+              const cleanTarget = displayName.toLowerCase();
+              matchedFile = printFiles.find(f =>
+                (f.display_name && f.display_name.toLowerCase() === cleanTarget) ||
+                (f.name && f.name.toLowerCase() === cleanTarget)
+              );
+            }
+
+            if (!matchedFile && printFiles.length > 0) {
+              // Match by closest m_timestamp before or near sessionTimestamp, or latest print file
+              let sessionEpochSec = 0;
+              if (sessionTimestamp && sessionTimestamp.length >= 15) {
+                const y = parseInt(sessionTimestamp.substring(0, 4), 10);
+                const m = parseInt(sessionTimestamp.substring(4, 6), 10) - 1;
+                const d = parseInt(sessionTimestamp.substring(6, 8), 10);
+                const hr = parseInt(sessionTimestamp.substring(9, 11), 10);
+                const mn = parseInt(sessionTimestamp.substring(11, 13), 10);
+                const sc = parseInt(sessionTimestamp.substring(13, 15), 10);
+                sessionEpochSec = Math.floor(Date.UTC(y, m, d, hr, mn, sc) / 1000);
+              }
+
+              const sorted = [...printFiles].sort((a, b) => (b.m_timestamp || 0) - (a.m_timestamp || 0));
+              if (sessionEpochSec > 0) {
+                // Find the most recent file uploaded before session start (with 18h tolerance for timezone/printing duration)
+                matchedFile = sorted.find(f => (f.m_timestamp || 0) <= sessionEpochSec + 64800) || sorted[0];
+              } else {
+                matchedFile = sorted[0];
+              }
+            }
+
+            if (matchedFile) {
+              if (!displayName) {
+                displayName = matchedFile.display_name || matchedFile.name || '';
+              }
+              if (!thumbRef) {
+                thumbRef = matchedFile.refs?.thumbnail || matchedFile.refs?.icon || null;
+              }
+            }
+          }
+        } catch (e) {}
+      }
+
+      if (!displayName && !existingMeta?.modelName) return null;
+
+      const parsed = parsePrusaFilename(displayName) || { displayName, modelName: existingMeta?.modelName || displayName };
+      if (existingMeta?.customName) {
+        parsed.modelName = existingMeta.customName;
+      }
+
+      let hasThumbnail = existsSync(thumbPath);
+      if (thumbRef && !hasThumbnail && config && config.prusaIp) {
         try {
           const thumbCtrl = new AbortController();
           const thumbTimeout = setTimeout(() => thumbCtrl.abort(), 5000);
@@ -171,13 +243,12 @@ class MonitorService {
               this.log(`Downloaded print thumbnail (${Math.round(buf.length / 1024)} KB) for "${parsed.modelName}"`, 'success');
             }
           }
-        } catch (e) {
-          // Non-fatal if thumbnail fails
-        }
+        } catch (e) {}
       }
 
       const meta = {
-        jobId: jobData.id || null,
+        ...existingMeta,
+        jobId: resolvedJobId,
         ...parsed,
         hasThumbnail,
         syncedAt: new Date().toISOString()
@@ -189,6 +260,33 @@ class MonitorService {
     } catch (e) {
       return null;
     }
+  }
+
+  async renameSession(sessionId, newName) {
+    if (!sessionId || typeof sessionId !== 'string' || !sessionId.startsWith('session_') || sessionId.includes('..')) {
+      throw new Error('Invalid session ID');
+    }
+    const cleanName = (newName || '').trim();
+    if (!cleanName) throw new Error('Session name cannot be empty');
+
+    const sessionDir = path.join(CAPTURES_DIR, sessionId);
+    const metaPath = path.join(sessionDir, 'meta.json');
+    let existing = {};
+    if (existsSync(metaPath)) {
+      try {
+        existing = JSON.parse(await fs.readFile(metaPath, 'utf-8'));
+      } catch (e) {}
+    }
+    const updated = {
+      ...existing,
+      modelName: cleanName,
+      customName: cleanName,
+      updatedAt: new Date().toISOString()
+    };
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.writeFile(metaPath, JSON.stringify(updated, null, 2), 'utf-8');
+    this.log(`Renamed session ${sessionId} to "${cleanName}"`, 'info');
+    return updated;
   }
 
   async downloadCameraFrame(ip, cameraIndex) {
@@ -407,7 +505,7 @@ class MonitorService {
     this.log(`PC Backup Sync stopped. Synced ${this.frameCount} frames to local PC.`, 'info');
   }
 
-  async fetchOfflineSession(targetSessionIds = null, sessionTimestamp = null) {
+  async fetchOfflineSession(targetSessionIds = null, sessionTimestamp = null, jobName = null, jobId = null) {
     if (this.isCompiling) {
       this.log('Cannot fetch offline session while compiling.', 'error');
       throw new Error('Monitor is busy compiling');
@@ -627,11 +725,13 @@ class MonitorService {
     
     try {
       await fs.rename(sessionDir, newSessionDir);
-      await this.syncJobMetadata(newSessionDir);
+      await this.syncJobMetadata(newSessionDir, jobId, jobName, timestamp);
+      this.remoteSessionsCache = this.remoteSessionsCache.filter(s => s.timestamp !== timestamp);
       this.log(`Session is no longer considered offline. Renamed to ${newSessionId}.`, 'info');
       return { success: true, sessionId: newSessionId };
     } catch (renameErr) {
-      await this.syncJobMetadata(sessionDir);
+      await this.syncJobMetadata(sessionDir, jobId, jobName, timestamp);
+      this.remoteSessionsCache = this.remoteSessionsCache.filter(s => s.timestamp !== timestamp);
       this.log(`Failed to rename session directory: ${renameErr.message}`, 'warning');
       return { success: true, sessionId }; 
     }
@@ -645,6 +745,8 @@ class MonitorService {
     }
     
     this.log('Wiping SD cards on all cameras...', 'warning');
+    this.remoteSessionsCache = [];
+    this.fetchStatus = null;
     let hasError = false;
     let errors = [];
     
@@ -711,9 +813,10 @@ class MonitorService {
               videos.push(item.name);
             } else if (item.isFile() && item.name === 'thumbnail.png') {
               hasThumbnail = true;
-            } else if (item.isFile() && item.name === 'meta.json') {
+            } else if (item.isFile() && (item.name === 'meta.json' || item.name === 'metadata.json')) {
               try {
-                meta = JSON.parse(await fs.readFile(path.join(sessionPath, 'meta.json'), 'utf-8'));
+                const parsedMeta = JSON.parse(await fs.readFile(path.join(sessionPath, item.name), 'utf-8'));
+                meta = { ...meta, ...parsedMeta };
               } catch (e) {}
             }
           }
@@ -722,6 +825,14 @@ class MonitorService {
           let timestamp = entry.name.replace('session_', '');
           if (isOffline) {
             timestamp = entry.name.replace('session_offline_', '');
+          }
+
+          if (!meta || !meta.modelName) {
+            const synced = await this.syncJobMetadata(sessionPath, meta?.jobId || meta?.job_id || null, meta?.displayName || meta?.job_name || null, timestamp);
+            if (synced) {
+              meta = synced;
+              if (synced.hasThumbnail) hasThumbnail = true;
+            }
           }
           
           sessions.push({
@@ -758,7 +869,7 @@ class MonitorService {
                   if (line.trim()) {
                     try {
                       const data = JSON.parse(line);
-                      let timestamp = data.timestamp; // "2026-06-09T20:39:15"
+                      let timestamp = data.timestamp;
                       let targetDate = null;
                       
                       if (timestamp && timestamp.length >= 15) {
@@ -783,21 +894,25 @@ class MonitorService {
                       const alreadyFetched = sessions.some(s => s.timestamp === timestamp && !s.isRemote);
                       
                       if (!alreadyFetched) {
-                        // Check if we have a remote session within 2 minutes (120000 ms) of this timestamp to group them
                         const existingRemote = this.remoteSessionsCache.find(s => {
                           return Math.abs(s.originalDate - targetDate.getTime()) < 120000;
                         });
+                        const remoteMeta = data.job_name ? parsePrusaFilename(data.job_name) : null;
                         
                         if (existingRemote) {
                           existingRemote.cameras.push({ name: `camera_${existingRemote.cameras.length}`, frameCount: data.frames, ip: ip });
                           existingRemote.remoteSessionIds[ip] = data.session;
+                          if (!existingRemote.meta && remoteMeta) existingRemote.meta = remoteMeta;
                         } else {
                           this.remoteSessionsCache.push({
                             id: `remote_${timestamp}`,
                             timestamp: timestamp,
-                            originalDate: targetDate.getTime(), // Store raw time for grouping subsequent cameras
+                            originalDate: targetDate.getTime(),
                             isOffline: true,
                             isRemote: true,
+                            jobId: data.job_id || null,
+                            jobName: data.job_name || null,
+                            meta: remoteMeta,
                             remoteSessionIds: { [ip]: data.session },
                             cameras: [{ name: `camera_0`, frameCount: data.frames, ip: ip }],
                             videos: []
@@ -848,26 +963,20 @@ class MonitorService {
 
   async deleteSession(sessionId) {
     if (sessionId.startsWith('remote_')) {
-      const parts = sessionId.split('_');
-      if (parts.length >= 3) {
-        const ip = parts[1];
-        const remoteSessionId = parts[2];
-        try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 5000);
-          const res = await fetch(`http://${ip}/delete_session_sd?session=${remoteSessionId}`, { signal: controller.signal });
-          clearTimeout(timeoutId);
-          if (res.ok) {
-            this.log(`Deleted remote session ${remoteSessionId} from camera ${ip}`, 'info');
-            return;
-          } else {
-            throw new Error(`Camera returned status ${res.status}`);
-          }
-        } catch (e) {
-          this.log(`Failed to delete remote session: ${e.message}`, 'error');
-          throw e;
+      const timestamp = sessionId.replace('remote_', '');
+      const remoteEntry = this.remoteSessionsCache.find(s => s.id === sessionId || s.timestamp === timestamp);
+      if (remoteEntry && remoteEntry.remoteSessionIds) {
+        for (const [ip, remoteSid] of Object.entries(remoteEntry.remoteSessionIds)) {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            await fetch(`http://${ip}/delete_session_sd?session=${remoteSid}`, { signal: controller.signal });
+            clearTimeout(timeoutId);
+          } catch (e) {}
         }
       }
+      this.remoteSessionsCache = this.remoteSessionsCache.filter(s => s.id !== sessionId && s.timestamp !== timestamp);
+      return;
     }
 
     if (!sessionId || typeof sessionId !== 'string' || !sessionId.startsWith('session_') || sessionId.includes('..')) {
@@ -880,10 +989,14 @@ class MonitorService {
 
   async deleteAllSessions() {
     try {
+      this.remoteSessionsCache = [];
+      this.fetchStatus = null;
       const sessions = await this.getSessions();
       for (const s of sessions) {
-        const sessionDir = path.join(CAPTURES_DIR, s.id);
-        await fs.rm(sessionDir, { recursive: true, force: true });
+        if (!s.isRemote) {
+          const sessionDir = path.join(CAPTURES_DIR, s.id);
+          await fs.rm(sessionDir, { recursive: true, force: true });
+        }
       }
       this.log('All sessions deleted.', 'info');
     } catch (e) {

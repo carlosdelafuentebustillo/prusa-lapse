@@ -236,6 +236,7 @@ float prevPollZ = -1.0;
 int zStableCount = 0;
 bool gcodeTriggerUsedInJob = false;
 int currentJobId = -1;
+String currentJobName = "";
 String currentPrinterState = "";
 float currentJobProgress = 0.0;
 float currentTempNozzle = 0.0;
@@ -1321,6 +1322,7 @@ void setupWebServer() {
     json += "\"max_z\":" + String(maxConfirmedZ) + ",";
     json += "\"trigger_mode\":\"" + activeTriggerMode + "\",";
     json += "\"job_id\":" + String(currentJobId) + ",";
+    json += "\"job_name\":\"" + currentJobName + "\",";
     json += "\"printer_state\":\"" + currentPrinterState + "\",";
     json += "\"job_progress\":" + String(currentJobProgress, 1) + ",";
     json += "\"temp_nozzle\":" + String(currentTempNozzle, 1) + ",";
@@ -1715,9 +1717,53 @@ void setup() {
             zStableCount = 0;
             gcodeTriggerUsedInJob = false;
             activeTriggerMode = "auto";
+            currentJobName = "";
           }
           if (jobId > 0) {
             currentJobId = jobId;
+          }
+
+          // Fetch print filename once per active job from /api/v1/job
+          static uint32_t lastJobNameFetchMs = 0;
+          if (state == "PRINTING" && currentJobName.length() == 0 && (millis() - lastJobNameFetchMs > 30000 || lastJobNameFetchMs == 0)) {
+            lastJobNameFetchMs = millis();
+            HTTPClient jobHttp;
+            jobHttp.setReuse(false);
+            jobHttp.setTimeout(2000);
+            jobHttp.begin("http://" + prusaIp + "/api/v1/job");
+            jobHttp.addHeader("X-Api-Key", prusaApiKey);
+            int jCode = jobHttp.GET();
+            if (jCode == 200) {
+              String jPayload = jobHttp.getString();
+              String extracted = "";
+              int dnIdx = jPayload.indexOf("\"display_name\":");
+              if (dnIdx != -1) {
+                int q1 = jPayload.indexOf("\"", dnIdx + 15);
+                if (q1 != -1) {
+                  int q2 = jPayload.indexOf("\"", q1 + 1);
+                  if (q2 != -1) extracted = jPayload.substring(q1 + 1, q2);
+                }
+              }
+              if (extracted.length() == 0) {
+                int fileIdx = jPayload.indexOf("\"file\":");
+                int nmIdx = jPayload.indexOf("\"name\":", fileIdx != -1 ? fileIdx : 0);
+                if (nmIdx != -1) {
+                  int q1 = jPayload.indexOf("\"", nmIdx + 7);
+                  if (q1 != -1) {
+                    int q2 = jPayload.indexOf("\"", q1 + 1);
+                    if (q2 != -1) extracted = jPayload.substring(q1 + 1, q2);
+                  }
+                }
+              }
+              extracted.replace("\"", "");
+              extracted.replace("\\", "");
+              extracted.trim();
+              if (extracted.length() > 0) {
+                currentJobName = extracted;
+                Serial.printf("Detected active print job name: %s\n", currentJobName.c_str());
+              }
+            }
+            jobHttp.end();
           }
 
           // Session state management
@@ -1829,9 +1875,9 @@ void setup() {
                     }
                   }
                   if (ts != "") {
-                    jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"timestamp\":\"%s\",\"job_id\":%d}\n", sessionId, offlineFrameCount, ts.c_str(), currentJobId);
+                    jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"timestamp\":\"%s\",\"job_id\":%d,\"job_name\":\"%s\"}\n", sessionId, offlineFrameCount, ts.c_str(), currentJobId, currentJobName.c_str());
                   } else {
-                    jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"job_id\":%d}\n", sessionId, offlineFrameCount, currentJobId);
+                    jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"job_id\":%d,\"job_name\":\"%s\"}\n", sessionId, offlineFrameCount, currentJobId, currentJobName.c_str());
                   }
                   jsonFile.close();
                   if (sd_mutex) xSemaphoreGive(sd_mutex);
@@ -1888,8 +1934,8 @@ void setup() {
                   zStableCount = 1;
                 }
 
-                if (maxConfirmedZ < 0.0f) {
-                  // Initialize baseline Z once stable at first layer (or current layer if booted mid-print)
+                if (maxConfirmedZ < 0.0f || (axis_z < maxConfirmedZ - 0.30f && zStableCount >= 3)) {
+                  // Initialize baseline Z once stable at first layer (or re-lock after pre-print Z=4mm/15mm park drop)
                   if (zStableCount >= 3) {
                     maxConfirmedZ = axis_z;
                     activeTriggerMode = "smart_z";

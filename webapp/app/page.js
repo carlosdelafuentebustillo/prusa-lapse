@@ -12,22 +12,31 @@ const parseSessionDate = (timestamp) => {
   const hour = parseInt(timestamp.substring(9, 11), 10);
   const min = parseInt(timestamp.substring(11, 13), 10);
   const sec = parseInt(timestamp.substring(13, 15), 10);
-  
-  const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const mIdx = month - 1;
   const mName = mIdx >= 0 && mIdx < 12 ? months[mIdx] : month;
   const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-  
-  return { 
-    monthName: mName, 
-    month: month, 
-    day, 
-    year, 
-    hour, min, sec, 
+
+  return {
+    monthName: mName,
+    month,
+    day,
+    year,
+    hour,
+    min,
+    sec,
     time: `${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}`,
-    dateStr, 
-    timestamp 
+    dateStr,
+    timestamp
   };
+};
+
+const getSessionDisplayName = (session, dateObj) => {
+  if (session?.meta?.modelName) return session.meta.modelName;
+  if (session?.jobName) return session.jobName.replace(/\.(bgcode|gcode|gco)$/i, '').replace(/_/g, ' ');
+  if (dateObj) return `Print Session · ${dateObj.monthName} ${dateObj.day}`;
+  return session?.id || 'Print Session';
 };
 
 export default function Home() {
@@ -44,17 +53,19 @@ export default function Home() {
   const [cameraSettings, setCameraSettings] = useState({});
   const [printerOfflineWarning, setPrinterOfflineWarning] = useState(false);
   const [configCollapsed, setConfigCollapsed] = useState(true);
+  const [showLogs, setShowLogs] = useState(false);
+  const [viewMode, setViewMode] = useState('list'); // 'list' | 'calendar'
   const [selectedSessionId, setSelectedSessionId] = useState(null);
+  const [editingSessionId, setEditingSessionId] = useState(null);
+  const [editingSessionName, setEditingSessionName] = useState('');
   const [isTesting, setIsTesting] = useState(false);
   const [fetchingSessionId, setFetchingSessionId] = useState(null);
   const [fetchStatus, setFetchStatus] = useState(null);
-  const [cameraNameInputs, setCameraNameInputs] = useState({});
-  
+
   const now = new Date();
   const [currentMonthDate, setCurrentMonthDate] = useState({ month: now.getMonth() + 1, year: now.getFullYear() });
 
   const [isDetecting, setIsDetecting] = useState(false);
-  const [connectTokenInputs, setConnectTokenInputs] = useState({});
   const [otaCameraIp, setOtaCameraIp] = useState('');
   const [otaFile, setOtaFile] = useState(null);
   const [isUpdatingOta, setIsUpdatingOta] = useState(false);
@@ -62,7 +73,6 @@ export default function Home() {
   const [latestFirmwareInfo, setLatestFirmwareInfo] = useState(null);
   const [useCustomOtaFile, setUseCustomOtaFile] = useState(false);
 
-  // Toast and Confirmation states
   const [toasts, setToasts] = useState([]);
   const [confirmModal, setConfirmModal] = useState(null);
 
@@ -81,7 +91,7 @@ export default function Home() {
   const handleOtaUpdate = async () => {
     if (!otaCameraIp) return;
     if (useCustomOtaFile && !otaFile) {
-      addToast('Please select a custom .bin firmware file or switch back to latest auto-detected firmware.', 'warning');
+      addToast('Please select a custom .bin firmware file.', 'warning');
       return;
     }
     setIsUpdatingOta(true);
@@ -98,12 +108,10 @@ export default function Home() {
     let fakeProgressInterval = null;
 
     const xhr = new XMLHttpRequest();
-    // Proxy through backend to avoid CORS/PNA mixed-content issues
     xhr.open('POST', `/api/camera/update?ip=${otaCameraIp}`, true);
-    
+
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) {
-        // Fast progress to 50% during the actual file upload to the server
         const percent = Math.round((e.loaded / e.total) * 50);
         currentProgress = percent;
         setOtaProgress(percent);
@@ -111,50 +119,45 @@ export default function Home() {
     };
 
     xhr.upload.onload = () => {
-      // Upload finished. ESP32 is flashing/rebooting. Slowly creep to 90%.
       fakeProgressInterval = setInterval(() => {
         if (currentProgress < 90) {
           currentProgress += 1;
           setOtaProgress(currentProgress);
         }
-      }, 500); // 1% every 0.5s = ~20 seconds to reach 90%
+      }, 500);
     };
 
     xhr.onload = () => {
       if (fakeProgressInterval) clearInterval(fakeProgressInterval);
-      
       const success = xhr.status === 200;
       const targetProgress = success ? 100 : 0;
       const step = success ? 2 : -2;
-      
-      // Animate quickly to the final outcome (100% or 0%)
+
       const endInterval = setInterval(() => {
         currentProgress += step;
-        
         if ((success && currentProgress >= targetProgress) || (!success && currentProgress <= targetProgress)) {
           clearInterval(endInterval);
           setOtaProgress(targetProgress);
-          
           setTimeout(() => {
             setIsUpdatingOta(false);
             if (success) {
-              addToast(`Firmware updated successfully! Camera is rebooting.`, 'success');
+              addToast('Firmware updated! Camera is rebooting.', 'success');
               setOtaCameraIp('');
             } else {
               addToast(`Firmware update failed: ${xhr.responseText}`, 'error');
             }
             setOtaProgress(0);
-          }, 500); // Small delay so user sees final 100% or 0%
+          }, 500);
         } else {
           setOtaProgress(currentProgress);
         }
-      }, 20); // very fast animation
+      }, 20);
     };
 
     xhr.onerror = () => {
       if (fakeProgressInterval) clearInterval(fakeProgressInterval);
       setIsUpdatingOta(false);
-      addToast(`Firmware update network error.`, 'error');
+      addToast('Firmware update network error.', 'error');
       setOtaProgress(0);
     };
 
@@ -169,7 +172,7 @@ export default function Home() {
       }
       await fetch(url);
     } catch (e) {
-      console.error("Failed to set camera control", e);
+      console.error('Failed to set camera control', e);
     }
   };
 
@@ -200,6 +203,15 @@ export default function Home() {
     return (val !== undefined && val !== null && val !== '') ? val : defaultVal;
   };
 
+  const getCameraDisplayName = (idx) => {
+    const ips = config.cameraIps ? config.cameraIps.split('\n').map(i => i.trim()).filter(Boolean) : [];
+    const ip = ips[idx];
+    if (ip && cameraSettings[ip]?.camera_name) {
+      return cameraSettings[ip].camera_name;
+    }
+    return `Camera ${idx + 1}`;
+  };
+
   const fetchCameraSettings = async (cameraIpsStr) => {
     if (!cameraIpsStr) return;
     const ips = cameraIpsStr.split('\n').map(ip => ip.trim()).filter(ip => ip);
@@ -212,6 +224,7 @@ export default function Home() {
           setCameraSettings(prev => ({
             ...prev,
             [ip]: {
+              ...prev[ip],
               brightness: data.brightness ?? 0,
               contrast: data.contrast ?? 0,
               hmirror: data.hmirror ?? 0,
@@ -250,8 +263,7 @@ export default function Home() {
   };
 
   useEffect(() => {
-      // Fetch once initially
-      fetch('/api/config')
+    fetch('/api/config')
       .then(res => res.json())
       .then(data => {
         if (data.config) {
@@ -265,7 +277,6 @@ export default function Home() {
         }
       });
 
-    // Check for latest compiled firmware binary automatically
     fetch('/api/camera/update')
       .then(res => res.json())
       .then(data => {
@@ -274,12 +285,10 @@ export default function Home() {
         }
       })
       .catch(() => {});
-      
-    // Fetch sessions once
-    fetchSessions();
+
+    fetchSessions(true);
   }, []);
 
-  // Continuously poll camera settings so if a camera boots up after page load, it enables itself
   useEffect(() => {
     if (!config.cameraIps) return;
     const cameraSettingsInterval = setInterval(() => {
@@ -297,7 +306,6 @@ export default function Home() {
   };
 
   useEffect(() => {
-    // Poll logs, run status, and active session status all the time
     const monitorInterval = setInterval(() => {
       fetch('/api/monitor')
         .then(res => res.json())
@@ -312,11 +320,10 @@ export default function Home() {
             setFetchStatus(data.fetchStatus);
           }
         })
-        .catch(err => console.error("Failed to poll monitor", err));
-    }, 1000);
+        .catch(() => {});
+    }, 2000);
 
-    // Poll sessions less frequently to update frame counts in real time
-    const sessionInterval = setInterval(fetchSessions, 3000);
+    const sessionInterval = setInterval(fetchSessions, 5000);
 
     return () => {
       clearInterval(monitorInterval);
@@ -341,9 +348,11 @@ export default function Home() {
       if (res.ok) {
         for (const ip of cameraIpArray) {
           const offlineVal = getCameraVal(ip, 'offline_mode', 1);
-          try { await fetch(`/api/camera/control?ip=${ip}&var=offline&val=${offlineVal}&prusa_ip=${encodeURIComponent(config.prusaIp)}&prusa_key=${encodeURIComponent(config.prusaApiKey)}`); } catch(e) {}
+          try {
+            await fetch(`/api/camera/control?ip=${ip}&var=offline&val=${offlineVal}&prusa_ip=${encodeURIComponent(config.prusaIp)}&prusa_key=${encodeURIComponent(config.prusaApiKey)}`);
+          } catch (e) {}
         }
-        if (!silent) addToast('Configuration saved and pushed to cameras!', 'success');
+        if (!silent) addToast('Configuration saved!', 'success');
       } else {
         addToast('Failed to save configuration.', 'error');
       }
@@ -365,9 +374,9 @@ export default function Home() {
         if (data.printers && data.printers.length > 0) {
           const firstPrinter = data.printers[0];
           if (updatedConfig.prusaIp !== firstPrinter) {
-             updatedConfig.prusaIp = firstPrinter;
-             didUpdate = true;
-             addToast(`Found Prusa printer at ${firstPrinter}`, 'success');
+            updatedConfig.prusaIp = firstPrinter;
+            didUpdate = true;
+            addToast(`Found Prusa printer at ${firstPrinter}`, 'success');
           }
         }
 
@@ -384,7 +393,7 @@ export default function Home() {
           if (addedCount > 0) {
             updatedConfig.cameraIps = newIps.join('\n');
             didUpdate = true;
-            addToast(`Discovered and added ${addedCount} new camera(s)!`, 'success');
+            addToast(`Discovered ${addedCount} new camera(s)!`, 'success');
           }
         }
 
@@ -397,11 +406,11 @@ export default function Home() {
             body: JSON.stringify({ ...updatedConfig, cameraIps: cameraIpArray })
           });
           for (const ip of cameraIpArray) {
-             const offlineVal = getCameraVal(ip, 'offline_mode', 1);
-             try { await fetch(`/api/camera/control?ip=${ip}&var=offline&val=${offlineVal}&prusa_ip=${encodeURIComponent(updatedConfig.prusaIp)}&prusa_key=${encodeURIComponent(updatedConfig.prusaApiKey)}`); } catch(e) {}
+            const offlineVal = getCameraVal(ip, 'offline_mode', 1);
+            try {
+              await fetch(`/api/camera/control?ip=${ip}&var=offline&val=${offlineVal}&prusa_ip=${encodeURIComponent(updatedConfig.prusaIp)}&prusa_key=${encodeURIComponent(updatedConfig.prusaApiKey)}`);
+            } catch (e) {}
           }
-        } else if ((!data.cameras || data.cameras.length === 0) && (!data.printers || data.printers.length === 0)) {
-          addToast('No devices discovered on the local network.', 'warning');
         } else {
           addToast('No new devices found.', 'info');
         }
@@ -425,11 +434,11 @@ export default function Home() {
       });
       if (res.ok) {
         setIsMonitoring(true);
-        addToast('Timelapse monitoring started', 'success');
+        addToast('Live PC sync started', 'success');
         fetchSessions();
         fetchCameraSettings(config.cameraIps);
       } else {
-        addToast('Failed to start monitoring', 'error');
+        addToast('Failed to start live sync', 'error');
       }
     } else {
       const res = await fetch('/api/monitor', {
@@ -439,10 +448,10 @@ export default function Home() {
       });
       if (res.ok) {
         setIsMonitoring(false);
-        addToast('Timelapse monitoring stopped', 'info');
+        addToast('Live PC sync stopped', 'info');
         fetchSessions();
       } else {
-        addToast('Failed to stop monitoring', 'error');
+        addToast('Failed to stop live sync', 'error');
       }
     }
   };
@@ -457,13 +466,12 @@ export default function Home() {
       });
       if (res.ok) {
         fetchSessions();
-        addToast(`Timelapse compilation complete for Camera ${cameraIndex}!`, 'success');
-        // Force the video player to reload if it's currently showing this compiled camera's video
-        setActiveVideo(prev => {
-          if (prev && prev.session === sessionId && prev.camera === `camera_${cameraIndex}`) {
-            return { ...prev, timestamp: Date.now() };
-          }
-          return prev;
+        addToast(`Compiled video for ${getCameraDisplayName(cameraIndex)}!`, 'success');
+        setActiveVideo({
+          session: sessionId,
+          camera: `camera_${cameraIndex}`,
+          cameraLabel: getCameraDisplayName(cameraIndex),
+          timestamp: Date.now()
         });
       } else {
         const err = await res.json();
@@ -476,9 +484,35 @@ export default function Home() {
     }
   };
 
-  const handleDeleteSession = (sessionId) => {
+  const handleRenameSession = async (sessionId) => {
+    const trimmed = editingSessionName.trim();
+    if (!trimmed) {
+      setEditingSessionId(null);
+      return;
+    }
+    try {
+      const res = await fetch('/api/sessions', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, name: trimmed })
+      });
+      if (res.ok) {
+        addToast(`Renamed session to "${trimmed}"`, 'success');
+        fetchSessions();
+      } else {
+        const err = await res.json();
+        addToast(`Rename failed: ${err.error}`, 'error');
+      }
+    } catch (e) {
+      addToast(`Rename failed: ${e.message}`, 'error');
+    } finally {
+      setEditingSessionId(null);
+    }
+  };
+
+  const handleDeleteSession = (sessionId, title) => {
     showConfirm(
-      `Are you sure you want to delete session ${sessionId}? This will permanently delete all captured frames and compiled videos.`,
+      `Delete "${title || sessionId}"? This removes its captured frames and compiled videos.`,
       async () => {
         try {
           const res = await fetch('/api/sessions', {
@@ -488,16 +522,16 @@ export default function Home() {
           });
           if (res.ok) {
             fetchSessions();
-            addToast('Session deleted successfully', 'success');
+            addToast('Session deleted', 'success');
             if (activeVideo && activeVideo.session === sessionId) {
               setActiveVideo(null);
             }
           } else {
             const err = await res.json();
-            addToast(`Failed to delete session: ${err.error}`, 'error');
+            addToast(`Failed to delete: ${err.error}`, 'error');
           }
         } catch (e) {
-          addToast(`Failed to delete session: ${e.message}`, 'error');
+          addToast(`Failed to delete: ${e.message}`, 'error');
         }
       }
     );
@@ -505,20 +539,20 @@ export default function Home() {
 
   const handleClearAllSessions = () => {
     showConfirm(
-      'Are you sure you want to delete ALL sessions? This will permanently delete all captured frames and videos.',
+      'Delete ALL local sessions and videos from this computer?',
       async () => {
         try {
           const res = await fetch('/api/sessions/clear', { method: 'DELETE' });
           if (res.ok) {
             fetchSessions();
-            addToast('All sessions deleted successfully', 'success');
+            addToast('All local sessions cleared', 'success');
             setActiveVideo(null);
           } else {
             const err = await res.json();
-            addToast(`Failed to clear sessions: ${err.error}`, 'error');
+            addToast(`Failed: ${err.error}`, 'error');
           }
         } catch (e) {
-          addToast(`Failed to clear sessions: ${e.message}`, 'error');
+          addToast(`Failed: ${e.message}`, 'error');
         }
       }
     );
@@ -526,7 +560,7 @@ export default function Home() {
 
   const handleTestCameras = async () => {
     setIsTesting(true);
-    addToast('Starting camera test flow...', 'info');
+    addToast('Running 5-frame camera test...', 'info');
     try {
       const res = await fetch('/api/monitor', {
         method: 'POST',
@@ -537,8 +571,8 @@ export default function Home() {
         const err = await res.json();
         addToast(`Test failed: ${err.error}`, 'error');
       } else {
-        addToast('Camera test completed successfully!', 'success');
-        fetchSessions();
+        addToast('Camera test completed! Click Refresh in Sessions to view.', 'success');
+        fetchSessions(true);
       }
     } catch (e) {
       addToast(`Test failed: ${e.message}`, 'error');
@@ -547,31 +581,34 @@ export default function Home() {
     }
   };
 
-  const handleFetchOffline = async (targetSessionIds = null, sessionTimestamp = null, sessionId = null) => {
+  const handleFetchOffline = async (session) => {
     if (isMonitoring) {
-      addToast('Please stop monitoring first.', 'warning');
+      addToast('Please stop Live Sync first.', 'warning');
       return;
     }
-    setFetchingSessionId(sessionId);
-    addToast('Fetching offline session from SD cards... This may take a while.', 'info');
+    setFetchingSessionId(session.id);
+    addToast('Syncing session from camera SD cards...', 'info');
     try {
-      const res = await fetch('/api/offline/fetch', { 
+      const res = await fetch('/api/offline/fetch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ targetSessionIds, sessionTimestamp })
+        body: JSON.stringify({
+          targetSessionIds: session.remoteSessionIds,
+          sessionTimestamp: session.timestamp,
+          jobName: session.jobName || session.meta?.displayName || null,
+          jobId: session.jobId || session.meta?.jobId || null
+        })
       });
       if (res.ok) {
-        addToast('Offline session fetched successfully!', 'success');
-        fetchSessions();
+        addToast('Session synced from SD card!', 'success');
+        fetchSessions(true);
       } else {
         const err = await res.json();
-        addToast(`Fetch failed: ${err.error}`, 'error');
-        if (err.sessionId) {
-          fetchSessions();
-        }
+        addToast(`Sync failed: ${err.error}`, 'error');
+        fetchSessions(true);
       }
     } catch (e) {
-      addToast(`Fetch failed: ${e.message}`, 'error');
+      addToast(`Sync failed: ${e.message}`, 'error');
     } finally {
       setFetchingSessionId(null);
     }
@@ -579,12 +616,13 @@ export default function Home() {
 
   const handleWipeSD = async () => {
     showConfirm(
-      'Are you sure you want to wipe all SD cards? This cannot be undone.',
+      'Wipe all timelapse files stored on the camera SD cards?',
       async () => {
         try {
           const res = await fetch('/api/offline/wipe', { method: 'POST' });
           if (res.ok) {
-            addToast('SD cards wiped successfully.', 'success');
+            addToast('Camera SD cards wiped.', 'success');
+            fetchSessions(true);
           } else {
             const err = await res.json();
             addToast(`Wipe failed: ${err.error}`, 'error');
@@ -596,233 +634,374 @@ export default function Home() {
     );
   };
 
-  const getDaysInMonth = (year, month) => {
-    return new Date(year, month, 0).getDate();
-  };
-
+  const getDaysInMonth = (year, month) => new Date(year, month, 0).getDate();
   const getFirstDayOfMonth = (year, month) => {
     const day = new Date(year, month - 1, 1).getDay();
-    return day === 0 ? 6 : day - 1; // 0 = Mon, ..., 6 = Sun
+    return day === 0 ? 6 : day - 1;
   };
 
   const generateCalendarDays = () => {
     const daysInMonth = getDaysInMonth(currentMonthDate.year, currentMonthDate.month);
     const firstDay = getFirstDayOfMonth(currentMonthDate.year, currentMonthDate.month);
-    
     const prevMonthDate = currentMonthDate.month === 1 ? { month: 12, year: currentMonthDate.year - 1 } : { month: currentMonthDate.month - 1, year: currentMonthDate.year };
-    const nextMonthDate = currentMonthDate.month === 12 ? { month: 1, year: currentMonthDate.year + 1 } : { month: currentMonthDate.month + 1, year: currentMonthDate.year };
-    
     const prevMonthDays = getDaysInMonth(prevMonthDate.year, prevMonthDate.month);
-    
+
     const days = [];
-    
-    // Previous month padding
     for (let i = firstDay - 1; i >= 0; i--) {
       days.push({ day: prevMonthDays - i, isOtherMonth: true });
     }
-    
-    // Current month days
     for (let i = 1; i <= daysInMonth; i++) {
       const dateStr = `${currentMonthDate.year}-${String(currentMonthDate.month).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
       days.push({ day: i, isOtherMonth: false, dateStr });
     }
-    
-    // Next month padding
-    const remainingCells = 42 - days.length; 
+    const remainingCells = 42 - days.length;
     for (let i = 1; i <= remainingCells; i++) {
       days.push({ day: i, isOtherMonth: true });
     }
-    
     return days;
   };
 
   const calendarDays = generateCalendarDays();
-
-  const handlePrevMonth = () => {
-    setCurrentMonthDate(prev => prev.month === 1 ? { month: 12, year: prev.year - 1 } : { month: prev.month - 1, year: prev.year });
-  };
-  
-  const handleNextMonth = () => {
-    setCurrentMonthDate(prev => prev.month === 12 ? { month: 1, year: prev.year + 1 } : { month: prev.month + 1, year: prev.year });
-  };
-
   const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+  // Check if any camera reports an active print
+  const activePrintCamera = Object.values(cameraSettings).find(c => c?.printer_state === 'PRINTING');
+  const activePrintName = activePrintCamera?.job_name
+    ? activePrintCamera.job_name.replace(/\.(bgcode|gcode|gco)$/i, '').replace(/_/g, ' ')
+    : null;
+
+  const renderSessionCard = (session) => {
+    const dateObj = parseSessionDate(session.timestamp);
+    const title = getSessionDisplayName(session, dateObj);
+    const isEditing = editingSessionId === session.id;
+    const totalFrames = (session.cameras || []).reduce((sum, c) => sum + (c.frameCount || 0), 0);
+
+    return (
+      <div key={session.id} className="session-card" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '14px', background: 'rgba(255,255,255,0.02)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
+          {/* Left: Thumbnail + Print Name + Date/Tags */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px', minWidth: 0, flex: 1 }}>
+            {session.hasThumbnail ? (
+              <img
+                src={`/api/captures?session=${session.id}&file=thumbnail.png`}
+                alt={title}
+                style={{ width: '56px', height: '56px', objectFit: 'contain', borderRadius: '8px', background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.08)', flexShrink: 0 }}
+              />
+            ) : (
+              <div style={{ width: '56px', height: '56px', borderRadius: '8px', background: 'rgba(250,104,49,0.08)', border: '1px solid rgba(250,104,49,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: 'var(--color-orange)' }}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                  <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                  <line x1="12" y1="22.08" x2="12" y2="12" />
+                </svg>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0, flex: 1 }}>
+              {isEditing ? (
+                <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    className="text-input"
+                    value={editingSessionName}
+                    onChange={(e) => setEditingSessionName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleRenameSession(session.id);
+                      if (e.key === 'Escape') setEditingSessionId(null);
+                    }}
+                    autoFocus
+                    style={{ padding: '4px 8px', fontSize: '0.9rem', maxWidth: '280px' }}
+                  />
+                  <button className="btn btn-primary btn-small" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => handleRenameSession(session.id)}>
+                    Save
+                  </button>
+                  <button className="btn btn-ghost btn-small" style={{ width: 'auto', padding: '4px 8px' }} onClick={() => setEditingSessionId(null)}>
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '1.02rem', fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {title}
+                  </span>
+                  {!session.isRemote && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingSessionId(session.id);
+                        setEditingSessionName(title);
+                      }}
+                      title="Rename print session"
+                      style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', padding: '2px', display: 'inline-flex', opacity: 0.7 }}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 20h9" />
+                        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                      </svg>
+                    </button>
+                  )}
+                  {session.meta?.material && (
+                    <span style={{ fontSize: '0.68rem', background: 'rgba(250,104,49,0.15)', color: 'var(--color-orange)', border: '1px solid rgba(250,104,49,0.3)', padding: '1px 7px', borderRadius: '10px', fontWeight: 600 }}>
+                      {session.meta.material}{session.meta?.layerHeight ? ` · ${session.meta.layerHeight}` : ''}
+                    </span>
+                  )}
+                  {session.isRemote && (
+                    <span style={{ fontSize: '0.68rem', background: 'rgba(232,83,63,0.15)', color: 'var(--color-danger)', border: '1px solid rgba(232,83,63,0.3)', padding: '1px 8px', borderRadius: '10px', fontWeight: 600 }}>
+                      On Camera SD
+                    </span>
+                  )}
+                </div>
+              )}
+
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                <span>{dateObj ? `${dateObj.monthName} ${dateObj.day}, ${dateObj.year} · ${dateObj.time}` : session.timestamp}</span>
+                <span>•</span>
+                <span>{session.cameras.length} {session.cameras.length === 1 ? 'camera' : 'cameras'} ({totalFrames} frames)</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Right: Delete button */}
+          <button
+            className="btn btn-ghost btn-small"
+            style={{ width: 'auto', padding: '5px 10px', fontSize: '0.75rem', color: 'var(--color-danger)', borderColor: 'rgba(232,83,63,0.25)' }}
+            onClick={() => handleDeleteSession(session.id, title)}
+            title="Delete Session"
+          >
+            Delete
+          </button>
+        </div>
+
+        {/* Camera Actions */}
+        {session.isRemote ? (
+          <div>
+            <button
+              className="btn btn-primary btn-small"
+              onClick={() => handleFetchOffline(session)}
+              style={{ width: '100%', position: 'relative', overflow: 'hidden', padding: '9px' }}
+              disabled={isMonitoring || fetchingSessionId !== null}
+            >
+              {fetchingSessionId === session.id && fetchStatus && fetchStatus.isFetching && (
+                <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', backgroundColor: 'rgba(0,0,0,0.25)', width: `${fetchStatus.progress}%`, transition: 'width 0.3s ease' }} />
+              )}
+              <span style={{ position: 'relative', zIndex: 1, display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                {fetchingSessionId === session.id ? (
+                  <>
+                    <span className="spinner" style={{ width: '14px', height: '14px' }} />
+                    {fetchStatus && fetchStatus.isFetching ? `Syncing Camera ${fetchStatus.currentCameraIndex + 1}/${fetchStatus.totalCameras} (${fetchStatus.progress}%)` : 'Syncing from SD...'}
+                  </>
+                ) : (
+                  'Sync Session from Camera SD'
+                )}
+              </span>
+            </button>
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '10px' }}>
+            {session.cameras.map((cam, idx) => {
+              const hasVideo = session.videos.includes(`camera_${idx}.mp4`);
+              const isThisCompiling = compilingStatus?.sessionId === session.id && compilingStatus?.cameraIndex === idx;
+              const camLabel = getCameraDisplayName(idx);
+
+              return (
+                <div key={cam.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', padding: '8px 12px', background: 'rgba(0,0,0,0.25)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                  <div style={{ fontSize: '0.8rem' }}>
+                    <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{camLabel}</div>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>{cam.frameCount} frames</div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                    {hasVideo && (
+                      <button
+                        className="btn btn-primary btn-small"
+                        style={{ width: 'auto', padding: '5px 10px', fontSize: '0.75rem' }}
+                        onClick={() => setActiveVideo({ session: session.id, title, camera: `camera_${idx}`, cameraLabel: camLabel, timestamp: Date.now() })}
+                      >
+                        Play
+                      </button>
+                    )}
+
+                    <button
+                      className={`btn btn-small ${hasVideo ? 'btn-ghost' : 'btn-secondary'}`}
+                      style={{ width: 'auto', padding: '5px 10px', fontSize: '0.75rem' }}
+                      disabled={cam.frameCount === 0 || isThisCompiling || !!compilingStatus}
+                      onClick={() => handleCompile(session.id, idx)}
+                    >
+                      {isThisCompiling ? 'Compiling…' : hasVideo ? 'Re-compile' : 'Compile MP4'}
+                    </button>
+
+                    {hasVideo && (
+                      <a
+                        href={`/api/captures?session=${session.id}&file=camera_${idx}.mp4&t=${Date.now()}`}
+                        download={`${title.replace(/[^a-z0-9-_]+/gi, '_')}_${camLabel}.mp4`}
+                        className="btn btn-ghost btn-small"
+                        style={{ width: 'auto', padding: '5px 8px', textDecoration: 'none', fontSize: '0.75rem' }}
+                        title="Download MP4"
+                      >
+                        MP4 ↓
+                      </a>
+                    )}
+
+                    <a
+                      href={`/api/captures/zip?session=${session.id}&camera=camera_${idx}`}
+                      className="btn btn-ghost btn-small"
+                      style={{ width: 'auto', padding: '5px 8px', textDecoration: 'none', fontSize: '0.75rem', pointerEvents: cam.frameCount === 0 ? 'none' : 'auto', opacity: cam.frameCount === 0 ? 0.4 : 1 }}
+                      title="Download RAW Frames ZIP"
+                    >
+                      ZIP ↓
+                    </a>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="dashboard-container">
-      {/* Header */}
-      <div className="header">
-        <img src="/logo.png" alt="Prusa-lapse" className="header-logo" />
-        <h1>Prusa-lapse</h1>
-        <p>Multi-Camera Cinematic Timelapse Controller</p>
+      {/* Compact Header */}
+      <div className="header" style={{ marginBottom: '24px' }}>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '14px' }}>
+          <img src="/logo.png" alt="Prusa-lapse" className="header-logo" style={{ width: '52px', height: '52px', marginBottom: 0 }} />
+          <div style={{ textAlign: 'left' }}>
+            <h1 style={{ fontSize: '1.9rem', marginBottom: '2px' }}>Prusa-lapse</h1>
+            <p style={{ fontSize: '0.9rem' }}>Dual-Camera 3D Print Timelapse Studio</p>
+          </div>
+        </div>
       </div>
 
-      {/* Main Grid */}
+      {/* Main Content */}
       <div className="grid">
-        {/* Timelapses */}
-        <div className="panel full-width-panel">
-          <h2>
+        {/* 1. Live Cameras Panel */}
+        <div className="panel full-width-panel" style={{ marginTop: 0 }}>
+          <h2 style={{ flexWrap: 'wrap', gap: '10px' }}>
             <span className="panel-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                 <circle cx="12" cy="13" r="4" />
               </svg>
-              Timelapses
+              Cameras
+              {activePrintCamera && (
+                <span style={{ fontSize: '0.78rem', background: 'rgba(250,104,49,0.15)', color: 'var(--color-orange)', border: '1px solid rgba(250,104,49,0.35)', padding: '2px 10px', borderRadius: '12px', fontWeight: 600, marginLeft: '6px' }}>
+                  Printing: {activePrintName || `Job #${activePrintCamera.job_id}`}
+                </span>
+              )}
             </span>
-            {isTesting && (
-              <span className="spinner" style={{ width: '18px', height: '18px', marginLeft: '12px' }} />
-            )}
+
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <button
+                className={`btn btn-small ${isMonitoring ? 'btn-danger' : 'btn-ghost'}`}
+                onClick={toggleMonitoring}
+                disabled={isTesting}
+                style={{ width: 'auto', padding: '6px 12px', fontSize: '0.78rem' }}
+                title="Stream frames directly from camera RAM to this PC while printing"
+              >
+                {isMonitoring ? `Stop Live Sync (${frameCount})` : 'Start Live PC Sync'}
+              </button>
+
+              <button
+                className="btn btn-ghost btn-small"
+                onClick={handleTestCameras}
+                disabled={isTesting}
+                style={{ width: 'auto', padding: '6px 12px', fontSize: '0.78rem' }}
+              >
+                {isTesting ? 'Testing…' : 'Test Capture'}
+              </button>
+            </div>
           </h2>
-
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '15px', alignItems: 'center', marginBottom: '20px' }}>
-            <button
-              className={`btn ${isMonitoring ? 'btn-danger' : 'btn-primary'}`}
-              onClick={toggleMonitoring}
-              style={{ flex: '2 1 200px' }}
-              disabled={isTesting}
-            >
-              {isMonitoring ? (
-                <>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                    <rect x="6" y="6" width="12" height="12" rx="1" />
-                  </svg>
-                  Stop PC Backup Sync
-                </>
-              ) : (
-                <>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                    <polygon points="5 3 19 12 5 21 5 3" />
-                  </svg>
-                  Start PC Backup Sync
-                </>
-              )}
-            </button>
-
-            <button 
-              className="btn btn-ghost" 
-              style={{ flex: '1 1 150px' }} 
-              onClick={handleTestCameras}
-              disabled={isTesting}
-            >
-              {isTesting ? (
-                <>
-                  <span className="spinner" style={{ width: '14px', height: '14px' }} />
-                  Testing...
-                </>
-              ) : (
-                <>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                    <circle cx="12" cy="13" r="4" />
-                  </svg>
-                  Test Cameras
-                </>
-              )}
-            </button>
-
-            {isMonitoring && (
-              <div style={{ flex: '1 1 120px', textAlign: 'right', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                <div style={{ fontWeight: '600', color: 'var(--text-primary)' }}>Frame {frameCount}</div>
-                <div style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)', opacity: 0.8 }}>{currentSession}</div>
-              </div>
-            )}
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', margin: 0 }}>
-              The cameras handle polling autonomously. Enable PC Backup Sync to automatically fetch frames from camera RAM to your computer as they are captured.
-            </p>
-          </div>
-
-
 
           <div className="cameras-grid">
-            {config.cameraIps && config.cameraIps.split('\n').filter(ip => ip.trim()).map((ip, idx) => {
-              const cleanIp = ip.trim();
-              const hmirror = getCameraVal(cleanIp, 'hmirror', 0);
-              const vflip = getCameraVal(cleanIp, 'vflip', 0);
-              const brightness = getCameraVal(cleanIp, 'brightness', 0);
-              const contrast = getCameraVal(cleanIp, 'contrast', 0);
-              return (
-                <CameraCard key={idx} cleanIp={cleanIp} idx={idx} cameraSettings={cameraSettings} updateCameraSetting={updateCameraSetting} getCameraVal={getCameraVal} fetchCameraSettings={fetchCameraSettings} config={config} addToast={addToast} />
-              );
-            })}
+            {config.cameraIps && config.cameraIps.split('\n').filter(ip => ip.trim()).map((ip, idx) => (
+              <CameraCard
+                key={idx}
+                cleanIp={ip.trim()}
+                idx={idx}
+                cameraSettings={cameraSettings}
+                updateCameraSetting={updateCameraSetting}
+                getCameraVal={getCameraVal}
+                fetchCameraSettings={fetchCameraSettings}
+                config={config}
+                addToast={addToast}
+              />
+            ))}
             {(!config.cameraIps || config.cameraIps.trim() === '') && (
               <div style={{ color: 'var(--text-secondary)', padding: '20px', textAlign: 'center', background: 'rgba(255,255,255,0.02)', borderRadius: '8px', border: '1px dashed rgba(255,255,255,0.1)' }}>
-                No cameras configured yet. Go to Configuration to add cameras.
+                No cameras configured yet. Open Settings below to auto-detect cameras.
               </div>
             )}
           </div>
-          
-          <SlicerPanel />
         </div>
 
-        {/* Sessions & Compilation Panel */}
+        {/* 2. Timelapse Sessions Panel */}
         <div className="panel full-width-panel">
-          <h2>
+          <h2 style={{ flexWrap: 'wrap', gap: '10px' }}>
             <span className="panel-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                <rect x="7" y="7" width="3" height="3" />
-                <rect x="14" y="7" width="3" height="3" />
-                <rect x="7" y="14" width="3" height="3" />
-                <rect x="14" y="14" width="3" height="3" />
+                <polygon points="23 7 16 12 23 17 23 7" />
+                <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
               </svg>
-              Timelapse sessions
+              Timelapse Sessions
+              <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontWeight: 400 }}>
+                ({sessions.length})
+              </span>
             </span>
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <button className="btn btn-ghost btn-small" onClick={() => fetchSessions(true)} style={{ width: 'auto' }}>
-                Refresh
+
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+              <select
+                className="input-field"
+                style={{ width: 'auto', padding: '4px 8px', fontSize: '0.75rem' }}
+                value={compileOptions.fps}
+                onChange={(e) => setCompileOptions(p => ({ ...p, fps: parseInt(e.target.value, 10) }))}
+                title="Output Video Framerate"
+              >
+                <option value="24">24 FPS</option>
+                <option value="30">30 FPS</option>
+                <option value="60">60 FPS</option>
+              </select>
+
+              <button
+                className="btn btn-ghost btn-small"
+                onClick={() => setViewMode(v => v === 'list' ? 'calendar' : 'list')}
+                style={{ width: 'auto', padding: '5px 10px', fontSize: '0.75rem' }}
+              >
+                {viewMode === 'list' ? 'Calendar View' : 'List View'}
               </button>
-              <button className="btn btn-danger btn-small" onClick={handleClearAllSessions} style={{ width: 'auto' }}>
-                Clear All Sessions
+
+              <button
+                className="btn btn-secondary btn-small"
+                onClick={() => fetchSessions(true)}
+                style={{ width: 'auto', padding: '5px 12px', fontSize: '0.75rem' }}
+              >
+                Check Camera SD
               </button>
-              <button className="btn btn-danger btn-small" onClick={handleWipeSD} style={{ width: 'auto' }}>
-                Delete All Offline Sessions
-              </button>
+
+              {sessions.length > 0 && (
+                <button
+                  className="btn btn-ghost btn-small"
+                  onClick={handleClearAllSessions}
+                  style={{ width: 'auto', padding: '5px 10px', fontSize: '0.75rem', color: 'var(--color-danger)' }}
+                >
+                  Clear All
+                </button>
+              )}
             </div>
           </h2>
-
-          <div style={{ background: 'rgba(20, 24, 30, 0.5)', padding: '1rem', borderRadius: '8px', marginBottom: '1.5rem', display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
-            <span style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>Compile Settings:</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <label style={{ fontSize: '0.85rem' }}>FPS:</label>
-              <input 
-                type="number" 
-                min="1" max="60"
-                className="input-field" 
-                style={{ width: '80px', padding: '0.4rem' }}
-                value={compileOptions.fps} 
-                onChange={(e) => setCompileOptions(p => ({...p, fps: parseInt(e.target.value)}))} 
-              />
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <label style={{ fontSize: '0.85rem' }}>Quality (CRF):</label>
-              <select 
-                className="input-field"
-                style={{ width: '160px', padding: '0.4rem' }}
-                value={compileOptions.quality}
-                onChange={(e) => setCompileOptions(p => ({...p, quality: parseInt(e.target.value)}))}
-              >
-                <option value="18">High (18)</option>
-                <option value="23">Standard (23)</option>
-                <option value="28">Draft (28)</option>
-              </select>
-            </div>
-          </div>
 
           {compilingStatus && (
             <div className="compiler-status-box">
               <span className="spinner" />
-              Compiling {compilingStatus.sessionId} (Camera {compilingStatus.cameraIndex}) into MP4. Please wait...
+              Compiling {getCameraDisplayName(compilingStatus.cameraIndex)} into MP4…
             </div>
           )}
 
           {activeVideo && (
-            <div style={{ marginBottom: '25px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+            <div style={{ marginBottom: '20px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                 <span style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                  Playing: <strong style={{ color: 'var(--text-primary)' }}>{activeVideo.session} - {activeVideo.camera}</strong>
+                  Playing: <strong style={{ color: 'var(--text-primary)' }}>{activeVideo.title || activeVideo.session} ({activeVideo.cameraLabel || activeVideo.camera})</strong>
                 </span>
                 <button className="btn btn-ghost btn-small" onClick={() => setActiveVideo(null)} style={{ width: 'auto' }}>
                   Close Player
@@ -840,170 +1019,27 @@ export default function Home() {
           )}
 
           {sessions.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)' }}>
-              No timelapse sessions recorded yet. Start monitoring and trigger a print to capture frames.
+            <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+              No timelapse sessions yet. Start a print on your Prusa printer or click <strong>Check Camera SD</strong> to sync finished prints.
+            </div>
+          ) : viewMode === 'list' ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {sessions.map(session => renderSessionCard(session))}
             </div>
           ) : (
             <>
-              {selectedSessionId && sessions.find(s => s.id === selectedSessionId) && (() => {
-                const session = sessions.find(s => s.id === selectedSessionId);
-                const dateObj = parseSessionDate(session.timestamp);
-                return (
-                  <div className="session-card expanded" style={{ marginBottom: '20px' }}>
-                    <div className="session-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px', gap: '12px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                        {session.hasThumbnail && (
-                          <img
-                            src={`/api/captures?session=${session.id}&file=thumbnail.png`}
-                            alt={session.meta?.modelName || 'Print Thumbnail'}
-                            style={{ width: '56px', height: '56px', objectFit: 'contain', borderRadius: '6px', background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.08)', flexShrink: 0 }}
-                          />
-                        )}
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                          <span className="session-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                            {session.meta?.modelName ? session.meta.modelName : (dateObj ? `${dateObj.monthName} ${dateObj.day}, ${dateObj.year} at ${dateObj.time}` : session.timestamp)}
-                            {session.meta?.material && (
-                              <span style={{ fontSize: '0.65rem', background: 'rgba(250,104,49,0.15)', color: 'var(--color-orange)', border: '1px solid rgba(250,104,49,0.3)', padding: '1px 6px', borderRadius: '10px', fontWeight: '600' }}>
-                                {session.meta.material}
-                              </span>
-                            )}
-                            {session.meta?.layerHeight && (
-                              <span style={{ fontSize: '0.65rem', background: 'rgba(255,255,255,0.08)', color: 'var(--text-secondary)', padding: '1px 6px', borderRadius: '10px', fontFamily: 'var(--font-mono)' }}>
-                                {session.meta.layerHeight}
-                              </span>
-                            )}
-                            {session.isOffline && session.isRemote && (
-                              <span style={{ fontSize: '0.65rem', background: 'rgba(232,83,63,0.15)', color: 'var(--color-danger)', border: '1px solid rgba(232,83,63,0.3)', padding: '2px 8px', borderRadius: '12px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                                Offline
-                              </span>
-                            )}
-                          </span>
-                          <span className="session-time" style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', opacity: 0.6 }}>
-                            {dateObj ? `${dateObj.monthName} ${dateObj.day}, ${dateObj.year} at ${dateObj.time} · ` : ''}ID: {session.id}
-                          </span>
-                        </div>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <button 
-                          className="btn btn-danger btn-small"
-                          style={{ width: 'auto', padding: '4px 8px', fontSize: '0.75rem' }}
-                          onClick={() => { handleDeleteSession(session.id); setSelectedSessionId(null); }}
-                        >
-                          Delete Session
-                        </button>
-                        <button 
-                          className="btn btn-ghost btn-small"
-                          style={{ width: 'auto', padding: '4px 8px', fontSize: '0.75rem' }}
-                          onClick={() => setSelectedSessionId(null)}
-                        >
-                          &times; Close
-                        </button>
-                      </div>
-                    </div>
-                    
-                    <div className="session-actions" style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--border-color)' }}>
-                      {session.isRemote ? (
-                        <div style={{ display: 'flex', justifyContent: 'center', padding: '10px' }}>
-                          <button 
-                            className="btn btn-primary" 
-                            onClick={() => handleFetchOffline(session.remoteSessionIds, session.timestamp, session.id)}
-                            style={{ width: '100%', position: 'relative', overflow: 'hidden' }}
-                            disabled={isMonitoring || fetchingSessionId !== null}
-                          >
-                            {fetchingSessionId === session.id && fetchStatus && fetchStatus.isFetching && (
-                              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', backgroundColor: 'rgba(0,0,0,0.25)', width: `${fetchStatus.progress}%`, transition: 'width 0.3s ease' }} />
-                            )}
-                            <div style={{ position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                              {fetchingSessionId === session.id ? (
-                                <>
-                                  <span className="spinner" style={{ width: '14px', height: '14px', marginRight: '8px' }} />
-                                  {fetchStatus && fetchStatus.isFetching ? `Camera ${fetchStatus.currentCameraIndex + 1}/${fetchStatus.totalCameras} - ${fetchStatus.progress}%` : 'Fetching Session...'}
-                                </>
-                              ) : (
-                                <>
-                                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '8px' }}>
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                    <polyline points="7 10 12 15 17 10" />
-                                    <line x1="12" y1="15" x2="12" y2="3" />
-                                  </svg>
-                                  Fetch Session from Cameras
-                                </>
-                              )}
-                            </div>
-                          </button>
-                        </div>
-                      ) : (
-                        session.cameras.map((cam, idx) => {
-                          const hasVideo = session.videos.includes(`camera_${idx}.mp4`);
-                          const isThisCompiling = compilingStatus?.sessionId === session.id && compilingStatus?.cameraIndex === idx;
-
-                          return (
-                            <div key={cam.name} style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '10px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.04)' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem', fontWeight: '600', color: 'var(--text-secondary)' }}>
-                                <span>Camera {idx} ({cam.frameCount} frames)</span>
-                              </div>
-                              <div style={{ display: 'flex', gap: '8px' }}>
-                                <button
-                                  className="btn btn-ghost btn-small"
-                                  style={{ flex: 1, padding: '8px 6px', fontSize: '0.8rem' }}
-                                  disabled={cam.frameCount === 0 || isThisCompiling || !!compilingStatus}
-                                  onClick={() => handleCompile(session.id, idx)}
-                                >
-                                  {isThisCompiling ? 'Compiling...' : hasVideo ? 'Re-compile' : 'Compile MP4'}
-                                </button>
-                                
-                                <a
-                                  href={`/api/captures/zip?session=${session.id}&camera=camera_${idx}`}
-                                  className={`btn btn-ghost btn-small ${cam.frameCount === 0 ? 'disabled' : ''}`}
-                                  style={{ flex: 1, textDecoration: 'none', pointerEvents: cam.frameCount === 0 ? 'none' : 'auto', opacity: cam.frameCount === 0 ? 0.5 : 1, padding: '8px 6px', fontSize: '0.8rem', display: 'flex', justifyContent: 'center', alignItems: 'center' }}
-                                >
-                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '4px' }}>
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                    <polyline points="7 10 12 15 17 10" />
-                                    <line x1="12" y1="15" x2="12" y2="3" />
-                                  </svg>
-                                  Download RAW images
-                                </a>
-                              </div>
-                              
-                              {hasVideo && (
-                                <div style={{ display: 'flex', gap: '8px' }}>
-                                  <button
-                                    className="btn btn-primary btn-small"
-                                    style={{ flex: 1, padding: '8px 6px', fontSize: '0.8rem' }}
-                                    onClick={() => setActiveVideo({ session: session.id, camera: `camera_${idx}`, timestamp: Date.now() })}
-                                  >
-                                    Play Video
-                                  </button>
-                                  <a
-                                    href={`/api/captures?session=${session.id}&file=camera_${idx}.mp4&t=${Date.now()}`}
-                                    download={`${session.id}_camera_${idx}.mp4`}
-                                    className="btn btn-ghost btn-small"
-                                    style={{ padding: '8px 10px', textDecoration: 'none', width: '40px', flexShrink: 0, display: 'flex', justifyContent: 'center', alignItems: 'center' }}
-                                  >
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                      <polyline points="7 10 12 15 17 10" />
-                                      <line x1="12" y1="15" x2="12" y2="3" />
-                                    </svg>
-                                  </a>
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  </div>
-                );
-              })()}
+              {selectedSessionId && sessions.find(s => s.id === selectedSessionId) && (
+                <div style={{ marginBottom: '16px' }}>
+                  {renderSessionCard(sessions.find(s => s.id === selectedSessionId))}
+                </div>
+              )}
 
               <div className="calendar-header-nav">
-                <button className="btn btn-ghost" style={{ width: 'auto' }} onClick={handlePrevMonth}>&lt;</button>
+                <button className="btn btn-ghost btn-small" style={{ width: 'auto' }} onClick={() => setCurrentMonthDate(prev => prev.month === 1 ? { month: 12, year: prev.year - 1 } : { month: prev.month - 1, year: prev.year })}>&lt;</button>
                 <div className="calendar-month-title">{monthNames[currentMonthDate.month - 1]} {currentMonthDate.year}</div>
-                <button className="btn btn-ghost" style={{ width: 'auto' }} onClick={handleNextMonth}>&gt;</button>
+                <button className="btn btn-ghost btn-small" style={{ width: 'auto' }} onClick={() => setCurrentMonthDate(prev => prev.month === 12 ? { month: 1, year: prev.year + 1 } : { month: prev.month + 1, year: prev.year })}>&gt;</button>
               </div>
-              
+
               <div className="calendar-grid">
                 {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(d => (
                   <div key={d} className="calendar-day-header">{d}</div>
@@ -1013,21 +1049,22 @@ export default function Home() {
                     const dObj = parseSessionDate(s.timestamp);
                     return dObj && dObj.dateStr === cDay.dateStr;
                   }) : [];
-                  
+
                   return (
                     <div key={i} className={`calendar-cell ${cDay.isOtherMonth ? 'other-month' : ''}`}>
                       <div className="calendar-date-number">{cDay.day}</div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', overflowY: 'auto', flex: 1 }}>
                         {daySessions.map(sess => {
                           const sObj = parseSessionDate(sess.timestamp);
+                          const pillTitle = getSessionDisplayName(sess, sObj);
                           return (
-                            <div 
-                              key={sess.id} 
-                              className={`session-pill ${sess.isOffline && sess.isRemote ? 'offline' : ''} ${selectedSessionId === sess.id ? 'selected' : ''}`}
+                            <div
+                              key={sess.id}
+                              className={`session-pill ${sess.isRemote ? 'offline' : ''} ${selectedSessionId === sess.id ? 'selected' : ''}`}
                               onClick={() => setSelectedSessionId(prev => prev === sess.id ? null : sess.id)}
-                              title={`${sess.meta?.modelName ? `Model: ${sess.meta.modelName}\n` : ''}Time: ${sObj.time}\nID: ${sess.id}\nCameras: ${sess.cameras.length}`}
+                              title={`${pillTitle} (${sObj?.time || ''})`}
                             >
-                              {sObj.time}{sess.meta?.modelName ? ` · ${sess.meta.modelName.slice(0, 10)}` : ''} {sess.isOffline && sess.isRemote ? '(Off)' : ''}
+                              {pillTitle}
                             </div>
                           );
                         })}
@@ -1040,15 +1077,21 @@ export default function Home() {
           )}
         </div>
 
-        {/* Configuration Panel */}
+        {/* 3. Optional G-Code Post-Processor (Collapsed by default) */}
+        <SlicerPanel />
+
+        {/* 4. System Settings & Firmware Panel (Collapsed by default) */}
         <div className="panel full-width-panel">
-          <h2 onClick={() => setConfigCollapsed(!configCollapsed)} style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h2
+            onClick={() => setConfigCollapsed(!configCollapsed)}
+            style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: configCollapsed ? 0 : '20px', borderBottom: configCollapsed ? 'none' : '1px solid var(--border-color)', paddingBottom: configCollapsed ? 0 : '12px' }}
+          >
             <span className="panel-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
-              Configuration
+              Printer, Cameras & Firmware Settings
             </span>
             <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
               {configCollapsed ? 'Expand' : 'Collapse'}
@@ -1061,53 +1104,49 @@ export default function Home() {
           {!configCollapsed && (
             <>
               {printerOfflineWarning && (
-                <div style={{ backgroundColor: 'rgba(255,50,50,0.1)', borderLeft: '4px solid #ff4444', padding: '12px 16px', margin: '0 0 20px 0', borderRadius: '4px', display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#ff4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-                    <line x1="12" y1="9" x2="12" y2="13"/>
-                    <line x1="12" y1="17" x2="12.01" y2="17"/>
-                  </svg>
-                  <div style={{ color: '#ff4444', fontSize: '14px', fontWeight: '500' }}>
-                    Warning: One or more ESP32-CAMs have lost connection to the PrusaLink Printer. Check the IP address or Auto-detect it below.
-                  </div>
+                <div style={{ backgroundColor: 'rgba(255,50,50,0.1)', borderLeft: '4px solid #ff4444', padding: '10px 14px', margin: '0 0 16px 0', borderRadius: '4px', color: '#ff4444', fontSize: '0.85rem' }}>
+                  One or more cameras cannot reach the PrusaLink printer. Check the printer IP below.
                 </div>
               )}
-              <div className="input-group">
-                <label>PrusaLink IP Address</label>
-                <input
-                  type="text"
-                  placeholder="192.168.1.50"
-                  value={config.prusaIp}
-                  onChange={(e) => setConfig({ ...config, prusaIp: e.target.value })}
-                />
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px', marginBottom: '16px' }}>
+                <div className="input-group" style={{ marginBottom: 0 }}>
+                  <label>PrusaLink IP Address</label>
+                  <input
+                    type="text"
+                    placeholder="192.168.1.64"
+                    value={config.prusaIp}
+                    onChange={(e) => setConfig({ ...config, prusaIp: e.target.value })}
+                  />
+                </div>
+
+                <div className="input-group" style={{ marginBottom: 0 }}>
+                  <label>PrusaLink API Key</label>
+                  <input
+                    type="password"
+                    placeholder="Enter API Key"
+                    value={config.prusaApiKey}
+                    onChange={(e) => setConfig({ ...config, prusaApiKey: e.target.value })}
+                  />
+                </div>
               </div>
 
               <div className="input-group">
-                <label>PrusaLink API Key</label>
-                <input
-                  type="password"
-                  placeholder="Enter API Key"
-                  value={config.prusaApiKey}
-                  onChange={(e) => setConfig({ ...config, prusaApiKey: e.target.value })}
-                />
-              </div>
-
-              <div className="input-group">
-                <label>Configured Cameras (Discovered)</label>
+                <label>Configured Cameras</label>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                   {config.cameraIps && config.cameraIps.split('\n').filter(ip => ip.trim()).map((ip, idx) => {
                     const cleanIp = ip.trim();
                     const name = getCameraVal(cleanIp, 'camera_name', `Camera ${idx + 1}`);
                     return (
-                      <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,0.05)', padding: '8px 12px', borderRadius: '6px' }}>
+                      <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,0.04)', padding: '8px 12px', borderRadius: '6px' }}>
                         <span>
-                          <strong>{name}</strong> 
-                          <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginLeft: '8px' }}>({cleanIp})</span>
-                          <span style={{ fontSize: '0.7rem', background: 'rgba(255,255,255,0.1)', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px', color: 'var(--text-secondary)' }}>
+                          <strong>{name}</strong>
+                          <span style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginLeft: '8px' }}>({cleanIp})</span>
+                          <span style={{ fontSize: '0.7rem', background: 'rgba(255,255,255,0.08)', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px', color: 'var(--text-secondary)' }}>
                             {getCameraVal(cleanIp, 'firmware_version', 'Unknown')}
                           </span>
                         </span>
-                        <button 
+                        <button
                           className="btn btn-danger btn-small"
                           style={{ width: 'auto', padding: '4px 8px' }}
                           onClick={() => {
@@ -1120,14 +1159,12 @@ export default function Home() {
                       </div>
                     );
                   })}
-                  {(!config.cameraIps || config.cameraIps.trim() === '') && (
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', fontStyle: 'italic' }}>No cameras configured. Use Auto-detect or add manually below.</div>
-                  )}
-                  <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-                    <input 
-                      type="text" 
-                      className="text-input" 
-                      placeholder="Add IP manually (e.g. 192.168.1.100)" 
+
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <input
+                      type="text"
+                      className="text-input"
+                      placeholder="Add camera IP (e.g. 192.168.1.38)"
                       id="new-camera-ip"
                       style={{ flex: 1 }}
                       onKeyDown={(e) => {
@@ -1144,9 +1181,9 @@ export default function Home() {
                         }
                       }}
                     />
-                    <button 
-                      className="btn btn-ghost"
-                      style={{ width: 'auto' }}
+                    <button
+                      className="btn btn-ghost btn-small"
+                      style={{ width: 'auto', padding: '0 16px' }}
                       onClick={() => {
                         const input = document.getElementById('new-camera-ip');
                         const val = input.value.trim();
@@ -1165,89 +1202,37 @@ export default function Home() {
                 </div>
               </div>
 
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
-                <button className="btn btn-ghost" style={{ flex: 1, minWidth: '120px' }} onClick={handleSaveConfig}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
-                    <polyline points="17 21 17 13 7 13 7 21" />
-                    <polyline points="7 3 7 8 15 8" />
-                  </svg>
-                  Save
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginBottom: '20px' }}>
+                <button className="btn btn-primary btn-small" style={{ flex: 1, minWidth: '120px', padding: '9px' }} onClick={() => handleSaveConfig(false)}>
+                  Save Settings
                 </button>
-                <button className="btn btn-ghost" style={{ flex: 1, minWidth: '120px' }} onClick={handleAutoDetect} disabled={isDetecting}>
-                  {isDetecting ? (
-                    <>
-                      <span className="spinner" style={{ width: '14px', height: '14px' }} />
-                      Detecting...
-                    </>
-                  ) : (
-                    <>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <circle cx="11" cy="11" r="8" />
-                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
-                        <line x1="11" y1="8" x2="11" y2="14" />
-                        <line x1="8" y1="11" x2="14" y2="11" />
-                      </svg>
-                      Auto-detect
-                    </>
-                  )}
+                <button className="btn btn-ghost btn-small" style={{ flex: 1, minWidth: '120px', padding: '9px' }} onClick={handleAutoDetect} disabled={isDetecting}>
+                  {isDetecting ? 'Scanning…' : 'Auto-detect Devices'}
                 </button>
-              </div>
-
-              {/* Webapp Log */}
-              <div className="input-group" style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '20px', marginTop: '20px' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-orange)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                    <polyline points="14 2 14 8 20 8" />
-                    <line x1="16" y1="13" x2="8" y2="13" />
-                    <line x1="16" y1="17" x2="8" y2="17" />
-                    <polyline points="10 9 9 9 8 9" />
-                  </svg>
-                  Webapp Log
-                </label>
-                <div className="log-box" ref={logBoxRef}>
-                  {logs.length === 0 ? (
-                    <div className="log-placeholder">
-                      System logs will appear here
-                    </div>
-                  ) : (
-                    logs.map((log, i) => (
-                      <div key={i} className={`log-entry ${log.type}`}>
-                        <span className="log-time">[{log.time}]</span> {log.message}
-                      </div>
-                    ))
-                  )}
-                </div>
+                <button className="btn btn-ghost btn-small" style={{ width: 'auto', padding: '9px 14px', color: 'var(--color-danger)' }} onClick={handleWipeSD}>
+                  Wipe Camera SD Cards
+                </button>
               </div>
 
               {/* OTA Firmware Update */}
-              <div className="input-group" style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '20px', marginTop: '20px' }}>
+              <div className="input-group" style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '16px', marginBottom: '16px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', flexWrap: 'wrap', gap: '8px' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-orange)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                      <polyline points="17 8 12 3 7 8" />
-                      <line x1="12" y1="3" x2="12" y2="15" />
-                    </svg>
-                    OTA Firmware Update
-                  </label>
+                  <label style={{ margin: 0 }}>OTA Firmware Update</label>
                   {latestFirmwareInfo && latestFirmwareInfo.available && (
-                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#34D399' }} />
-                      Latest built: <strong style={{ color: 'var(--color-orange)' }}>{latestFirmwareInfo.version}</strong> ({latestFirmwareInfo.sizeFormatted})
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                      Latest build: <strong style={{ color: 'var(--color-orange)' }}>{latestFirmwareInfo.version}</strong> ({latestFirmwareInfo.sizeFormatted})
                     </span>
                   )}
                 </div>
 
                 <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
-                  <select 
-                    className="text-input" 
+                  <select
+                    className="text-input"
                     style={{ flex: 1, minWidth: '180px' }}
                     value={otaCameraIp}
                     onChange={(e) => setOtaCameraIp(e.target.value)}
                   >
-                    <option value="">Select Camera to Update...</option>
+                    <option value="">Select Camera…</option>
                     {config.cameraIps && config.cameraIps.split('\n').filter(ip => ip.trim()).map((ip, idx) => (
                       <option key={ip} value={ip.trim()}>
                         {getCameraVal(ip.trim(), 'camera_name', `Camera ${idx + 1}`)} ({ip.trim()})
@@ -1256,21 +1241,21 @@ export default function Home() {
                   </select>
 
                   {useCustomOtaFile ? (
-                    <input 
-                      type="file" 
-                      accept=".bin" 
-                      onChange={(e) => setOtaFile(e.target.files[0])} 
-                      style={{ flex: 2, minWidth: '200px', color: 'var(--text-primary)' }}
+                    <input
+                      type="file"
+                      accept=".bin"
+                      onChange={(e) => setOtaFile(e.target.files[0])}
+                      style={{ flex: 2, minWidth: '180px', color: 'var(--text-primary)' }}
                     />
                   ) : (
-                    <div style={{ flex: 2, minWidth: '200px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '6px', padding: '6px 12px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--text-secondary)' }}>
+                    <div style={{ flex: 2, minWidth: '180px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '6px', padding: '7px 12px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--text-secondary)' }}>
                       <span>
-                        Automatic: <strong style={{ color: 'var(--text-primary)' }}>firmware.bin</strong> {latestFirmwareInfo?.version ? `(${latestFirmwareInfo.version})` : ''}
+                        Auto: <strong style={{ color: 'var(--text-primary)' }}>firmware.bin</strong> {latestFirmwareInfo?.version ? `(${latestFirmwareInfo.version})` : ''}
                       </span>
                       <button
                         type="button"
                         className="btn btn-ghost btn-small"
-                        style={{ padding: '2px 8px', fontSize: '0.7rem' }}
+                        style={{ width: 'auto', padding: '2px 8px', fontSize: '0.7rem' }}
                         onClick={() => setUseCustomOtaFile(true)}
                       >
                         Custom .bin
@@ -1278,38 +1263,49 @@ export default function Home() {
                     </div>
                   )}
 
-                  {useCustomOtaFile && (
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-small"
-                      style={{ padding: '6px 10px', fontSize: '0.75rem' }}
-                      onClick={() => {
-                        setUseCustomOtaFile(false);
-                        setOtaFile(null);
-                      }}
-                    >
-                      Use Latest
-                    </button>
-                  )}
-
-                  <button 
-                    className="btn btn-primary"
+                  <button
+                    className="btn btn-primary btn-small"
                     onClick={handleOtaUpdate}
                     disabled={!otaCameraIp || isUpdatingOta || (useCustomOtaFile && !otaFile)}
-                    style={{ flex: 1, minWidth: '140px' }}
+                    style={{ width: 'auto', padding: '9px 18px' }}
                   >
-                    {isUpdatingOta 
-                      ? `Updating... ${otaProgress}%` 
+                    {isUpdatingOta
+                      ? `Updating… ${otaProgress}%`
                       : (!useCustomOtaFile && latestFirmwareInfo?.version ? `Flash ${latestFirmwareInfo.version}` : 'Flash Firmware')}
                   </button>
                 </div>
+              </div>
+
+              {/* Collapsible System Logs */}
+              <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '12px' }}>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-small"
+                  style={{ width: 'auto', padding: '4px 10px', fontSize: '0.75rem' }}
+                  onClick={() => setShowLogs(s => !s)}
+                >
+                  {showLogs ? 'Hide System Logs' : `Show System Logs (${logs.length})`}
+                </button>
+
+                {showLogs && (
+                  <div className="log-box" ref={logBoxRef} style={{ marginTop: '10px', height: '180px' }}>
+                    {logs.length === 0 ? (
+                      <div className="log-placeholder">System logs will appear here</div>
+                    ) : (
+                      logs.map((log, i) => (
+                        <div key={i} className={`log-entry ${log.type}`}>
+                          <span className="log-time">[{log.time}]</span> {log.message}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
               </div>
             </>
           )}
         </div>
       </div>
 
-      {/* Footer */}
       <div className="footer">
         Prusa-lapse &middot; Open Source &middot; MIT License
       </div>
@@ -1319,35 +1315,6 @@ export default function Home() {
         <div className="toast-container">
           {toasts.map(toast => (
             <div key={toast.id} className={`toast-card toast-${toast.type}`}>
-              <div className="toast-icon">
-                {toast.type === 'success' && (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-                    <polyline points="22 4 12 14.01 9 11.01" />
-                  </svg>
-                )}
-                {toast.type === 'error' && (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10" />
-                    <line x1="15" y1="9" x2="9" y2="15" />
-                    <line x1="9" y1="9" x2="15" y2="15" />
-                  </svg>
-                )}
-                {toast.type === 'warning' && (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
-                    <line x1="12" y1="9" x2="12" y2="13" />
-                    <line x1="12" y1="17" x2="12.01" y2="17" />
-                  </svg>
-                )}
-                {toast.type === 'info' && (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10" />
-                    <line x1="12" y1="16" x2="12" y2="12" />
-                    <line x1="12" y1="8" x2="12.01" y2="8" />
-                  </svg>
-                )}
-              </div>
               <div className="toast-content">{toast.message}</div>
               <button className="toast-close" onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))}>
                 &times;
@@ -1363,31 +1330,21 @@ export default function Home() {
         <div className="modal-backdrop">
           <div className="modal-card">
             <div className="modal-header">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="modal-icon text-danger">
-                <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
-                <line x1="12" y1="9" x2="12" y2="13" />
-                <line x1="12" y1="17" x2="12.01" y2="17" />
-              </svg>
               <h3>Confirm Action</h3>
             </div>
-            <div className="modal-body">
-              {confirmModal.message}
-            </div>
+            <div className="modal-body">{confirmModal.message}</div>
             <div className="modal-footer">
-              <button 
-                className="btn btn-ghost" 
-                onClick={() => setConfirmModal(null)}
-              >
+              <button className="btn btn-ghost" onClick={() => setConfirmModal(null)}>
                 Cancel
               </button>
-              <button 
-                className="btn btn-danger" 
+              <button
+                className="btn btn-danger"
                 onClick={() => {
                   confirmModal.onConfirm();
                   setConfirmModal(null);
                 }}
               >
-                Delete
+                Confirm
               </button>
             </div>
           </div>
