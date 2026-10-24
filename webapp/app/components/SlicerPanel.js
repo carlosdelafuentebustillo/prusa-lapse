@@ -8,6 +8,7 @@ import { saveAs } from 'file-saver';
 const GcodePreview3D = dynamic(() => import('./GcodePreview3D'), { ssr: false });
 
 export default function SlicerPanel() {
+  const [collapsed, setCollapsed] = useState(true);
   const [files, setFiles] = useState([]);
   const [parsedGcode, setParsedGcode] = useState(null);
   const [triggerType, setTriggerType] = useState('park'); // 'park', 'snap', or 'snap-smooth'
@@ -103,18 +104,32 @@ export default function SlicerPanel() {
 
   return (
     <div className="panel full-width-panel" style={{ marginTop: '20px' }}>
-      <h2>
+      <h2
+        onClick={() => setCollapsed(!collapsed)}
+        style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: collapsed ? 0 : '20px', borderBottom: collapsed ? 'none' : '1px solid var(--border-color)', paddingBottom: collapsed ? 0 : '12px' }}
+      >
         <span className="panel-icon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
             <polyline points="2 17 12 22 22 17"></polyline>
             <polyline points="2 12 12 17 22 12"></polyline>
           </svg>
-          G-Code Post-Processor
+          G-Code Park Post-Processor
+          <span style={{ fontSize: '0.75rem', fontWeight: 400, color: 'var(--text-secondary)', marginLeft: '6px' }}>
+            (Optional)
+          </span>
+        </span>
+        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+          {collapsed ? 'Expand' : 'Collapse'}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: collapsed ? 'rotate(-90deg)' : 'none', transition: 'transform 0.2s ease' }}>
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
         </span>
       </h2>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
+      {!collapsed && (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
         <div>
           <h3>1. Upload G-Code</h3>
           <p className="subtitle" style={{ marginBottom: '1rem' }}>Upload `.gcode` to inject Prusa-lapse triggers.</p>
@@ -298,6 +313,8 @@ export default function SlicerPanel() {
           )}
         </div>
       ) : null}
+        </>
+      )}
     </div>
   );
 }
