@@ -22,7 +22,7 @@ int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 10
-#define FIRMWARE_VERSION "v1.2.3"
+#define FIRMWARE_VERSION "v1.2.4"
 
 bool offlineMode = false;
 bool sdCardAvailable = false;
@@ -481,21 +481,18 @@ void previewAndUploadTask(void *pvParameters) {
   int backoffCycles = 0;
 
   while (true) {
-    vTaskDelay(pdMS_TO_TICKS(PREVIEW_CAPTURE_INTERVAL));
+    // Dynamic interval: 30s during active print to avoid TLS/SD collision, 10s when idle
+    uint32_t currentInterval = (currentPrinterState == "PRINTING") ? 30000 : 10000;
+    vTaskDelay(pdMS_TO_TICKS(currentInterval));
 
     if (capture_in_progress || sd_write_in_progress) {
       continue; // Don't interfere with HQ timelapse captures or SD writes
     }
 
-    // If printing and Prusa Connect is offline/unconfigured, don't disturb the UXGA sensor every 10s
-    bool wantPrusaConnect = (WiFi.status() == WL_CONNECTED && prusaConnectToken.length() > 0 && prusaConnectFingerprint.length() > 0);
-    if (currentPrinterState == "PRINTING" && (!wantPrusaConnect || prusaConnectFailures >= 2)) {
-      continue;
-    }
-
-    // --- 1. Take a fresh VGA preview snapshot ---
+    // --- 1. Take a fresh VGA preview snapshot (keeps local webapp live & responsive) ---
     takePreviewSnapshot();
 
+    bool wantPrusaConnect = (WiFi.status() == WL_CONNECTED && prusaConnectToken.length() > 0 && prusaConnectFingerprint.length() > 0);
     if (!wantPrusaConnect) {
       continue;
     }
@@ -511,7 +508,8 @@ void previewAndUploadTask(void *pvParameters) {
       infoClient.setInsecure();
       infoClient.setTimeout(3);
       if (infoClient.connect("camera-service.prusa3d.com", 443, 3000)) {
-        String jsonPayload = "{\"config\":{\"name\":\"" + cameraName + "\",\"trigger_scheme\":\"TEN_SEC\"},\"device\":{\"type\":\"ESP32\",\"firmware_version\":\"" + String(FIRMWARE_VERSION) + "\",\"hardware_version\":\"ESP32-CAM\"}}";
+        String triggerScheme = (currentPrinterState == "PRINTING") ? "THIRTY_SEC" : "TEN_SEC";
+        String jsonPayload = "{\"config\":{\"name\":\"" + cameraName + "\",\"trigger_scheme\":\"" + triggerScheme + "\"},\"device\":{\"type\":\"ESP32\",\"firmware_version\":\"" + String(FIRMWARE_VERSION) + "\",\"hardware_version\":\"ESP32-CAM\"}}";
         
         infoClient.println("PUT /v1/camera-info HTTP/1.1");
         infoClient.println("Host: camera-service.prusa3d.com");
@@ -539,10 +537,15 @@ void previewAndUploadTask(void *pvParameters) {
               if (code >= 200 && code < 300) {
                 prusaConnectInfoSent = true;
                 prusaConnectFailures = 0;
+                backoffCycles = 0;
                 Serial.printf("Prusa Connect: Camera Info registered successfully (HTTP %d).\n", code);
               } else {
                 prusaConnectFailures++;
-                Serial.printf("Prusa Connect: Info payload failed with code %d\n", code);
+                if (prusaConnectFailures >= 2) {
+                  backoffCycles = (currentPrinterState == "PRINTING") ? 4 : 12; // 2 minutes backoff
+                  prusaConnectFailures = 0;
+                  Serial.printf("Prusa Connect: Info payload failed with code %d. Backing off for 2 minutes (%d cycles)...\n", code, backoffCycles);
+                }
               }
               break;
             }
@@ -555,7 +558,11 @@ void previewAndUploadTask(void *pvParameters) {
         Serial.println("Prusa Connect: Info client HTTPS connection failed");
         last_prusa_connect_code = -1;
         prusaConnectFailures++;
-        if (prusaConnectFailures >= 2) backoffCycles = 5; // Wait ~60s before retrying unreachable cloud
+        if (prusaConnectFailures >= 2) {
+          backoffCycles = (currentPrinterState == "PRINTING") ? 4 : 12; // 2 minutes backoff
+          prusaConnectFailures = 0;
+          Serial.printf("Prusa Connect: Info client unreachable. Backing off for 2 minutes (%d cycles)...\n", backoffCycles);
+        }
         infoClient.stop();
         continue;
       }
@@ -620,7 +627,17 @@ void previewAndUploadTask(void *pvParameters) {
                   httpCode = line.substring(sp + 1, sp + 4).toInt();
                 }
                 last_prusa_connect_code = httpCode;
-                prusaConnectFailures = 0;
+                if (httpCode >= 200 && httpCode < 300) {
+                  prusaConnectFailures = 0;
+                  backoffCycles = 0;
+                } else {
+                  prusaConnectFailures++;
+                  if (prusaConnectFailures >= 2) {
+                    backoffCycles = (currentPrinterState == "PRINTING") ? 4 : 12; // 2 minutes backoff
+                    prusaConnectFailures = 0;
+                    Serial.printf("Prusa Connect: HTTP %d. Backing off for 2 minutes (%d cycles)...\n", httpCode, backoffCycles);
+                  }
+                }
               }
               if (line.length() == 0) {
                 Serial.printf("Prusa Connect upload: %d (%d/%d bytes)\n", httpCode, sent, upload_len);
@@ -634,7 +651,11 @@ void previewAndUploadTask(void *pvParameters) {
           Serial.println("Prusa Connect: HTTPS connection failed");
           last_prusa_connect_code = -1;
           prusaConnectFailures++;
-          if (prusaConnectFailures >= 2) backoffCycles = 5;
+          if (prusaConnectFailures >= 2) {
+            backoffCycles = (currentPrinterState == "PRINTING") ? 4 : 12; // 2 minutes backoff
+            prusaConnectFailures = 0;
+            Serial.printf("Prusa Connect: Cloud unreachable. Backing off for 2 minutes (%d cycles)...\n", backoffCycles);
+          }
           client.stop();
         }
       }
