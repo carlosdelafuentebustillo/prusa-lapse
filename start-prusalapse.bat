@@ -1,12 +1,14 @@
 @echo off
-title Prusa-lapse Server
+title PrusaLapse Server
+setlocal enabledelayedexpansion
 
 echo ================================================================
-echo                    PRUSA-LAPSE WEBAPP LAUNCHER
+echo                    PRUSALAPSE WEBAPP LAUNCHER
 echo ================================================================
 echo.
 
 :: Locate webapp directory
+set "ROOT_DIR=%~dp0"
 set "APP_DIR=%~dp0webapp"
 if not exist "%APP_DIR%\package.json" (
     set "APP_DIR=C:\Users\cafub\Documents\Antigravity\dual-dalmatian\webapp"
@@ -25,13 +27,20 @@ cd /d "%APP_DIR%"
 where node >nul 2>nul
 if %errorlevel% neq 0 (
     echo [ERROR] Node.js was not found in your system PATH!
-    echo Please install Node.js v18 or higher from https://nodejs.org
+    echo Please install Node.js from https://nodejs.org
     echo.
     pause
     exit /b 1
 )
 
-:: 2. Verify dependencies
+:: 2. Clean up any stale process occupying port 3000
+echo [INFO] Checking port 3000...
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr :3000 ^| findstr LISTENING') do (
+    echo [INFO] Stopping stale process on port 3000 (PID: %%a)...
+    taskkill /F /PID %%a >nul 2>nul
+)
+
+:: 3. Verify dependencies
 if not exist "node_modules\" (
     echo [INFO] First-time setup: Installing dependencies...
     call npm.cmd install
@@ -42,7 +51,7 @@ if not exist "node_modules\" (
     )
 )
 
-:: 3. Verify production build
+:: 4. Verify production build
 if not exist ".next\" (
     echo [INFO] Building production bundle for fast startup...
     call npm.cmd run build
@@ -51,17 +60,20 @@ if not exist ".next\" (
     )
 )
 
-:: 4. Launch browser in background after 2 seconds
+:: 5. Launch browser automatically once server starts
 start "" powershell -WindowStyle Hidden -Command "Start-Sleep -Seconds 2; Start-Process 'http://localhost:3000'"
 
-echo [INFO] Server starting at: http://localhost:3000
-echo [INFO] Your browser will open automatically.
 echo.
-echo Press Ctrl+C in this window to stop the server.
+echo ================================================================
+echo   PrusaLapse is running at: http://localhost:3000
+echo   Your default web browser is opening automatically.
+echo.
+echo   Keep this window open while using PrusaLapse.
+echo   Press Ctrl+C to stop the server.
 echo ================================================================
 echo.
 
-:: 5. Start server (production start preferred)
+:: 6. Start server (production mode)
 if exist ".next\" (
     call npm.cmd run start
 ) else (
@@ -70,7 +82,7 @@ if exist ".next\" (
 
 if %errorlevel% neq 0 (
     echo.
-    echo [WARN] Production server failed to start. Trying dev mode...
+    echo [WARN] Production server exited with error. Trying dev mode...
     call npm.cmd run dev
 )
 
