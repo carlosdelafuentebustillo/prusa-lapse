@@ -606,6 +606,8 @@ class MonitorService {
       }
     }
 
+    this.fetchStatus = null;
+
     if (totalFramesFetched === 0) {
       await fs.rm(sessionDir, { recursive: true, force: true });
       this.log('Offline fetch aborted. No files were downloaded.', 'warning');
@@ -777,8 +779,8 @@ class MonitorService {
                         timestamp = generateSessionTimestamp(targetDate);
                       }
                       
-                      // Check if we already fetched this exact offline session locally
-                      const alreadyFetched = sessions.some(s => s.timestamp === timestamp && s.isOffline && !s.isRemote);
+                      // Check if we already fetched this session locally
+                      const alreadyFetched = sessions.some(s => s.timestamp === timestamp && !s.isRemote);
                       
                       if (!alreadyFetched) {
                         // Check if we have a remote session within 2 minutes (120000 ms) of this timestamp to group them
