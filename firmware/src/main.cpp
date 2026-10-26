@@ -22,7 +22,7 @@ int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 10
-#define FIRMWARE_VERSION "v1.2.4"
+#define FIRMWARE_VERSION "v1.2.5"
 
 bool offlineMode = false;
 bool sdCardAvailable = false;
@@ -328,6 +328,7 @@ volatile bool capture_in_progress = false;
 // HQ Timelapse Capture (UXGA) — triggered by PrusaLink Z-change or M220 S99
 void captureTask(void *pvParameters) {
     capture_in_progress = true;
+    static size_t rollingAvgLen = 0;
     
     if (camera_mutex && xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(6000)) == pdTRUE) {
       sensor_t * s = esp_camera_sensor_get();
@@ -341,30 +342,46 @@ void captureTask(void *pvParameters) {
       // Auto Flash (led_state = 2)
       if (led_state == 2) {
         digitalWrite(4, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(150)); // let auto-exposure adjust to the light
+        vTaskDelay(pdMS_TO_TICKS(180)); // let auto-exposure adjust to the light
       }
       
-      // Switch to UXGA for high-quality timelapse capture
-      if (s && psramFound()) {
+      // Ensure UXGA without triggering an unnecessary sensor mode reset if already at UXGA
+      if (s && psramFound() && s->status.framesize != FRAMESIZE_UXGA) {
         s->set_framesize(s, FRAMESIZE_UXGA);
+        vTaskDelay(pdMS_TO_TICKS(250));
       }
       
-      // Flush stale frames and let sensor settle at new resolution
-      // (2 frames with 120ms delay flushes fb_count=2 buffers in ~0.5s total)
+      // Flush stale frames from hardware DMA buffers (fb_count=2)
       for (int i = 0; i < 2; i++) {
-        vTaskDelay(pdMS_TO_TICKS(120));
+        vTaskDelay(pdMS_TO_TICKS(80));
         camera_fb_t *old_fb = esp_camera_fb_get();
         if (old_fb) esp_camera_fb_return(old_fb);
       }
       
       camera_fb_t *fb = esp_camera_fb_get();
+
+      // Guard against momentary underexposed / dark-green AEC dips:
+      // Crushed dark frames compress to <42KB (or <58% of the scene's rolling average JPEG size).
+      bool isDarkAnomaly = fb && (fb->len < 42000 || (rollingAvgLen > 75000 && fb->len < (rollingAvgLen * 58) / 100));
+      if (isDarkAnomaly) {
+        Serial.printf("HQ Capture: Dark/underexposed frame detected (%u bytes vs avg %u). Waiting for AEC settle & re-capturing...\n",
+                      (unsigned int)fb->len, (unsigned int)rollingAvgLen);
+        esp_camera_fb_return(fb);
+        fb = NULL;
+        for (int retry = 0; retry < 3; retry++) {
+          vTaskDelay(pdMS_TO_TICKS(160));
+          camera_fb_t *flush_fb = esp_camera_fb_get();
+          if (flush_fb) esp_camera_fb_return(flush_fb);
+        }
+        fb = esp_camera_fb_get();
+      }
       
       // Turn flash back off if in Auto mode
       if (led_state == 2) {
         digitalWrite(4, LOW);
       }
       
-      if (!fb || fb->len < 10000) {
+      if (!fb || fb->len < 15000) {
         Serial.println("HQ Capture failed or image too small");
         if (fb) esp_camera_fb_return(fb);
         consecutiveCaptureFailures++;
@@ -373,8 +390,6 @@ void captureTask(void *pvParameters) {
           esp_camera_deinit();
           setupCamera();
           consecutiveCaptureFailures = 0;
-        } else if (s) {
-          s->set_framesize(s, FRAMESIZE_VGA);
         }
         xSemaphoreGive(camera_mutex);
         capture_in_progress = false;
@@ -382,6 +397,14 @@ void captureTask(void *pvParameters) {
         return;
       }
       consecutiveCaptureFailures = 0;
+
+      if (fb->len >= 45000) {
+        if (rollingAvgLen == 0) {
+          rollingAvgLen = fb->len;
+        } else {
+          rollingAvgLen = (rollingAvgLen * 7 + fb->len) / 8;
+        }
+      }
       
       // Store in HQ timelapse buffer (overwritten each capture)
       if (captured_photo_buf) {
@@ -399,7 +422,7 @@ void captureTask(void *pvParameters) {
       if (captured_photo_buf) {
         memcpy(captured_photo_buf, fb->buf, fb->len);
         captured_photo_len = fb->len;
-        Serial.printf("HQ Capture: %d bytes (UXGA)\n", fb->len);
+        Serial.printf("HQ Capture: %d bytes (UXGA, avg=%u)\n", fb->len, (unsigned int)rollingAvgLen);
       }
       
       // Wake up the background SD writer task
@@ -409,9 +432,7 @@ void captureTask(void *pvParameters) {
       
       esp_camera_fb_return(fb);
       
-      // Switch back to VGA (idle resolution for previews)
-      if (s) s->set_framesize(s, FRAMESIZE_VGA);
-      
+      // Keep sensor at FRAMESIZE_UXGA when PSRAM is present so AEC/AGC/AWB never resets!
       xSemaphoreGive(camera_mutex);
     }
     
@@ -430,8 +451,13 @@ void takePreviewSnapshot() {
     }
     if (led_state == 2) digitalWrite(4, HIGH); // Auto Flash on inside mutex
 
-    // Camera should already be at VGA, but ensure it
-    if (s) s->set_framesize(s, FRAMESIZE_VGA);
+    // Do NOT switch resolution between VGA and UXGA when PSRAM is available:
+    // switching framesize resets OV2640 AEC/AGC/AWB registers and causes dark green frames!
+    framesize_t targetSize = psramFound() ? FRAMESIZE_UXGA : FRAMESIZE_VGA;
+    if (s && s->status.framesize != targetSize) {
+      s->set_framesize(s, targetSize);
+      vTaskDelay(pdMS_TO_TICKS(200));
+    }
     
     if (led_state == 2) vTaskDelay(pdMS_TO_TICKS(150)); // let auto-exposure adjust
 
@@ -731,12 +757,12 @@ void setupCamera() {
     s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
     s->set_wb_mode(s, 0);        // 0 to 4 (0 = Auto)
     s->set_exposure_ctrl(s, 1);  // 0 = disable , 1 = enable
-    s->set_aec2(s, 0);           // 0 = disable , 1 = enable
-    s->set_ae_level(s, 0);       // -2 to 2
+    s->set_aec2(s, 1);           // Enable DSP AEC2 to prevent dark-green underexposure
+    s->set_ae_level(s, 1);       // +1 AE bias so printer bed isn't crushed when LED strip is visible
     s->set_gain_ctrl(s, 1);      // 0 = disable , 1 = enable
     s->set_agc_gain(s, 0);       // 0 to 30
-    s->set_gainceiling(s, (gainceiling_t)0);
-    s->set_bpc(s, 0);            // 0 = disable , 1 = enable
+    s->set_gainceiling(s, GAINCEILING_16X); // Allow up to 16x gain in UXGA mode (was 2x which caused black/green frames)
+    s->set_bpc(s, 1);            // Enable black pixel correction
     s->set_wpc(s, 1);            // 0 = disable , 1 = enable
     s->set_raw_gma(s, 1);        // 0 = disable , 1 = enable
     s->set_lenc(s, 1);           // 0 = disable , 1 = enable
@@ -744,7 +770,7 @@ void setupCamera() {
     s->set_vflip(s, vflipVal);          // 0 = disable , 1 = enable
     s->set_dcw(s, 1);            // 0 = disable , 1 = enable
     s->set_colorbar(s, 0);       // Ensure test pattern / color bar is DISABLED!
-    s->set_framesize(s, FRAMESIZE_VGA); // Boot at VGA — idle resolution for previews
+    s->set_framesize(s, psramFound() ? FRAMESIZE_UXGA : FRAMESIZE_VGA); // Keep at UXGA continuously so AEC/AWB never resets
   }
 }
 
@@ -1540,6 +1566,7 @@ void setupWiFi() {
       Serial.println(WiFi.localIP());
       WiFi.setSleep(false); // Disable WiFi sleep to reduce latency and prevent disconnections
       WiFi.setTxPower(WIFI_POWER_15dBm); // Reduce TX power to limit current draw and avoid power brownouts/stalls
+      configTime(0, 0, "pool.ntp.org", "time.nist.gov"); // Sync UTC time via NTP for session timestamps
     }
   }
 }
