@@ -1,0 +1,9 @@
+{
+  "id": "com.prusalapse.timelapse",
+  "name": "Prusa-lapse Parked Timelapse Trigger",
+  "description": "Injects parked-head timelapse triggers (M220 S99) across layers natively inside PrusaSlicer 3.0 with full .bgcode support.",
+  "author": "Prusa-lapse",
+  "license": "MIT",
+  "min_slicer_version": "3.0.0",
+  "version": "1.0.0"
+}

@@ -9,15 +9,18 @@ const GcodePreview3D = dynamic(() => import('./GcodePreview3D'), { ssr: false })
 
 export default function SlicerPanel() {
   const [collapsed, setCollapsed] = useState(true);
-  const [files, setFiles] = useState([]);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [show3DPreview, setShow3DPreview] = useState(false);
   const [parsedGcode, setParsedGcode] = useState(null);
-  const [triggerType, setTriggerType] = useState('park'); // 'park', 'snap', or 'snap-smooth'
+  const [triggerType, setTriggerType] = useState('park');
   const [isDragging, setIsDragging] = useState(false);
-  const [isExporting, setIsExporting] = useState(false);
-  const [downloadData, setDownloadData] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [lastProcessed, setLastProcessed] = useState(null);
+  const [pluginStatus, setPluginStatus] = useState(null);
+  const [isInstallingPlugin, setIsInstallingPlugin] = useState(false);
+  const [copiedSnippet, setCopiedSnippet] = useState(false);
   const fileInputRef = useRef(null);
 
-  // Configuration state
   const [config, setConfig] = useState({
     parkX: 240,
     parkY: 210,
@@ -31,66 +34,98 @@ export default function SlicerPanel() {
     triggerSignal: 'm220',
   });
 
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    setIsDragging(true);
+  const buildPrusaSlicerSnippet = () => {
+    const signalCmd =
+      config.triggerSignal === 'm221'
+        ? 'M221 S99 ; Trigger Prusa-lapse capture\nG4 P' + config.captureTime + '\nM221 S100 ; Restore flow'
+        : config.triggerSignal === 'gpio0'
+        ? 'M264 P0 S1\nG4 P100\nM264 P0 S0\nG4 P' + config.captureTime
+        : config.triggerSignal === 'serial'
+        ? 'M118 action:capture_photo\nG4 P' + config.captureTime
+        : 'M220 S99 ; Trigger Prusa-lapse capture\nG4 P' + config.captureTime + '\nM220 S100 ; Restore speed';
+
+    return [
+      '; --- PRUSA-LAPSE PARKED TRIGGER (works with .bgcode) ---',
+      '{if layer_num > 1}',
+      `G1 E-${config.retractDistance} F${config.retractSpeed} ; Retract`,
+      'G91',
+      `G1 Z${config.zHopHeight} F600 ; Z-hop lift`,
+      'G90',
+      'M83',
+      `G1 X${config.parkX} Y${config.parkY} F${config.travelSpeed} ; Park toolhead`,
+      `G4 P${config.settleTime} ; Settle vibrations`,
+      signalCmd,
+      'G1 Z[layer_z] F600 ; Restore layer Z',
+      `G1 E${config.retractDistance} F${config.retractSpeed} ; Un-retract`,
+      '{endif}',
+    ].join('\n');
   };
 
-  const handleDragLeave = (e) => {
-    e.preventDefault();
-    setIsDragging(false);
+  const handleCopySnippet = async () => {
+    try {
+      await navigator.clipboard.writeText(buildPrusaSlicerSnippet());
+      setCopiedSnippet(true);
+      setTimeout(() => setCopiedSnippet(false), 3000);
+    } catch (e) {}
   };
 
-  const handleFileDropSelect = async (selectedFile) => {
+  const handleInstallPlugin = async () => {
+    setIsInstallingPlugin(true);
+    setPluginStatus(null);
+    try {
+      const res = await fetch('/api/slicer/plugin', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setPluginStatus({
+          ok: true,
+          message: `Installed to ${data.installedPaths?.[0] || 'PrusaSlicer/lua'}. In PrusaSlicer 3.0+, click Plugins → Rescan.`
+        });
+      } else {
+        setPluginStatus({ ok: false, message: data.error || 'Failed to install plugin' });
+      }
+    } catch (e) {
+      setPluginStatus({ ok: false, message: e.message });
+    } finally {
+      setIsInstallingPlugin(false);
+    }
+  };
+
+  const handleProcessFile = async (selectedFile) => {
     if (!selectedFile) return;
     const name = selectedFile.name.toLowerCase();
-    setParsedGcode(null); // Reset
-    setDownloadData(null); // Reset
-    
-    if (name.endsWith('.gcode')) {
-      setFiles([selectedFile]);
-      // Parse immediately for 3D preview
-      const text = await selectedFile.text();
-      setParsedGcode(parseGcodeForPreview(text));
-    } else if (name.endsWith('.bgcode')) {
-      alert('Binary G-code (.bgcode) is not supported by Prusa-lapse. Please disable "Supports binary G-code" in PrusaSlicer settings and export as standard ASCII G-code.');
-    } else {
-      alert('Please upload a valid .gcode file.');
-    }
-  };
 
-  const handleDrop = (e) => {
-    e.preventDefault();
-    setIsDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      handleFileDropSelect(e.dataTransfer.files[0]);
+    if (name.endsWith('.bgcode')) {
+      setPluginStatus({
+        ok: false,
+        message: 'Binary .bgcode files are compressed. Use Option 1 (PrusaSlicer 3.0 Plugin) or Option 2 (Copy Snippet into PrusaSlicer) so PrusaSlicer injects triggers before creating the .bgcode file!'
+      });
+      return;
     }
-  };
 
-  const handleFileSelect = (e) => {
-    if (e.target.files && e.target.files.length > 0) {
-      handleFileDropSelect(e.target.files[0]);
+    if (!name.endsWith('.gcode')) {
+      setPluginStatus({ ok: false, message: 'Please select a .gcode file.' });
+      return;
     }
-  };
 
-  const handleExport = async () => {
-    if (files.length === 0) return;
-    setIsExporting(true);
+    setIsProcessing(true);
+    setParsedGcode(null);
+    setShow3DPreview(false);
+
     try {
       const { processGcode } = await import('./exportGcode');
-      const result = await processGcode(files[0], config, triggerType);
-      
-      setParsedGcode(parseGcodeForPreview(result.outputText));
-      setDownloadData({
-        blob: result.blob,
+      const result = await processGcode(selectedFile, config, triggerType);
+      saveAs(result.blob, result.outName);
+      setLastProcessed({
+        inName: selectedFile.name,
         outName: result.outName,
+        blob: result.blob,
+        outputText: result.outputText,
         layersModified: result.layersModified
       });
     } catch (error) {
-      console.error(error);
-      alert('Error processing file: ' + error.message);
+      setPluginStatus({ ok: false, message: 'Error processing G-code: ' + error.message });
     } finally {
-      setIsExporting(false);
+      setIsProcessing(false);
     }
   };
 
@@ -103,217 +138,309 @@ export default function SlicerPanel() {
   };
 
   return (
-    <div className="panel full-width-panel" style={{ marginTop: '20px' }}>
+    <div className="panel full-width-panel">
       <h2
         onClick={() => setCollapsed(!collapsed)}
-        style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: collapsed ? 0 : '20px', borderBottom: collapsed ? 'none' : '1px solid var(--border-color)', paddingBottom: collapsed ? 0 : '12px' }}
+        style={{
+          cursor: 'pointer',
+          userSelect: 'none',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: collapsed ? 0 : '16px',
+          borderBottom: collapsed ? 'none' : '1px solid var(--border-color)',
+          paddingBottom: collapsed ? 0 : '12px'
+        }}
       >
         <span className="panel-icon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
-            <polyline points="2 17 12 22 22 17"></polyline>
-            <polyline points="2 12 12 17 22 12"></polyline>
+            <polygon points="12 2 2 7 12 12 22 7 12 2" />
+            <polyline points="2 17 12 22 22 17" />
+            <polyline points="2 12 12 17 22 12" />
           </svg>
-          G-Code Park Post-Processor
+          Parked Timelapse Setup (PrusaSlicer Plugin &amp; G-Code)
           <span style={{ fontSize: '0.75rem', fontWeight: 400, color: 'var(--text-secondary)', marginLeft: '6px' }}>
-            (Optional)
+            (Optional — Smart Z works automatically without this)
           </span>
         </span>
         <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
           {collapsed ? 'Expand' : 'Collapse'}
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: collapsed ? 'rotate(-90deg)' : 'none', transition: 'transform 0.2s ease' }}>
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{ transform: collapsed ? 'rotate(-90deg)' : 'none', transition: 'transform 0.2s ease' }}
+          >
             <polyline points="6 9 12 15 18 9" />
           </svg>
         </span>
       </h2>
 
       {!collapsed && (
-        <>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
-        <div>
-          <h3>1. Upload G-Code</h3>
-          <p className="subtitle" style={{ marginBottom: '1rem' }}>Upload `.gcode` to inject Prusa-lapse triggers.</p>
-          <div 
-            className={`drop-zone ${isDragging ? 'dragging' : ''}`}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            style={{ 
-              border: `2px dashed ${isDragging ? '#FA6831' : '#444'}`, 
-              borderRadius: '8px', 
-              padding: '2rem', 
-              textAlign: 'center',
-              cursor: 'pointer',
-              background: isDragging ? 'rgba(250, 104, 49, 0.1)' : 'transparent',
-              transition: 'all 0.3s ease'
-            }}
-            onClick={() => fileInputRef.current.click()}
-          >
-            <input 
-              type="file" 
-              ref={fileInputRef} 
-              onChange={handleFileSelect} 
-              accept=".gcode" 
-              style={{ display: 'none' }} 
-            />
-            {files.length > 0 ? (
-              <div>
-                <div style={{ color: '#FA6831', fontSize: '2.5rem', marginBottom: '0.5rem' }}>&#128196;</div>
-                <h4 style={{ margin: 0 }}>{files.length} file{files.length !== 1 ? 's' : ''} loaded</h4>
-                <p style={{ color: '#888', marginTop: '0.2rem', fontSize: '0.8rem' }}>Click or drag to add more</p>
-              </div>
-            ) : (
-              <div>
-                <div style={{ color: '#444', fontSize: '2.5rem', marginBottom: '0.5rem' }}>&#8681;</div>
-                <h4 style={{ margin: 0 }}>Drag & Drop .gcode here</h4>
-                <p style={{ color: '#888', marginTop: '0.2rem', fontSize: '0.8rem' }}>or click to browse</p>
-              </div>
-            )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <div style={{ fontSize: '0.83rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+            Your cameras already capture layer changes automatically via <strong>Smart Z</strong>. Only use one of the options below if you want <strong>Parked-Head Timelapses</strong> (moving the extruder to <code>X{config.parkX} Y{config.parkY}</code> on every layer so the print appears to grow by magic).
           </div>
-        </div>
 
-        <div style={{ transition: 'opacity 0.3s' }}>
-          <h3>2. Configure Trigger</h3>
+          {/* 3 Simple Workflow Cards */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '14px' }}>
+            {/* Option 1: PrusaSlicer 3.0 Lua Plugin */}
+            <div style={{ background: 'rgba(255,255,255,0.025)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '10px', padding: '16px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '12px' }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}>
+                  <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text-primary)' }}>
+                    1. PrusaSlicer 3.0 Lua Plugin
+                  </span>
+                  <span style={{ fontSize: '0.68rem', background: 'rgba(250,104,49,0.15)', color: 'var(--color-orange)', border: '1px solid rgba(250,104,49,0.35)', padding: '1px 7px', borderRadius: '10px', fontWeight: 600 }}>
+                    Supports .bgcode
+                  </span>
+                </div>
+                <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.45 }}>
+                  Installs <code>com.prusalapse.timelapse</code> directly into PrusaSlicer&apos;s <code>lua/</code> plugins folder. Run from <strong>Plugins → Prusa-lapse</strong> before slicing.
+                </p>
+              </div>
 
-          <div style={{ marginBottom: '1rem', display: 'flex', gap: '1rem' }}>
-            <div style={{ flex: 1 }}>
-              <label className="label">Trigger Mode</label>
-              <select 
-                className="input-field" 
-                value={triggerType} 
-                onChange={(e) => setTriggerType(e.target.value)}
-                style={{ width: '100%' }}
-              >
-                <option value="park">Standard Park (Fixed X/Y)</option>
-                <option value="snap">Snap to Print (Fixed Anchor)</option>
-                <option value="snap-smooth">Snap to Print (Smooth / Wandering)</option>
-              </select>
-            </div>
-            
-            {(triggerType === 'snap' || triggerType === 'snap-smooth') && (
-              <div style={{ flex: 1 }}>
-                <label className="label">Quality Mode</label>
-                <select 
-                   className="input-field" 
-                  value={config.qualityMode || 'balanced'} 
-                  onChange={handleChange}
-                  name="qualityMode"
-                  style={{ width: '100%' }}
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-small"
+                  style={{ flex: 1, padding: '8px 12px', fontSize: '0.78rem' }}
+                  onClick={handleInstallPlugin}
+                  disabled={isInstallingPlugin}
                 >
-                  <option value="balanced">Balanced (Prioritize Time)</option>
-                  <option value="high">High Quality (Avoid Perimeters)</option>
-                </select>
+                  {isInstallingPlugin ? 'Installing…' : '1-Click Install Plugin'}
+                </button>
+                <a
+                  href="/api/slicer/plugin"
+                  download="com.prusalapse.timelapse.zip"
+                  className="btn btn-ghost btn-small"
+                  style={{ width: 'auto', padding: '8px 10px', fontSize: '0.75rem', textDecoration: 'none' }}
+                  title="Download Plugin Bundle (.zip)"
+                >
+                  .ZIP ↓
+                </a>
               </div>
-            )}
+            </div>
 
-          </div>
+            {/* Option 2: PrusaSlicer 2.8 / 2.9 / 3.0 Custom G-Code Preset */}
+            <div style={{ background: 'rgba(255,255,255,0.025)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '10px', padding: '16px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '12px' }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}>
+                  <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text-primary)' }}>
+                    2. PrusaSlicer Preset Snippet
+                  </span>
+                  <span style={{ fontSize: '0.68rem', background: 'rgba(46,204,113,0.15)', color: '#2ecc71', border: '1px solid rgba(46,204,113,0.35)', padding: '1px 7px', borderRadius: '10px', fontWeight: 600 }}>
+                    v2.8 / v2.9 &amp; .bgcode
+                  </span>
+                </div>
+                <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.45 }}>
+                  Paste once into <strong>Printer Settings → Custom G-code → After layer change G-code</strong>. Works automatically on every slice including binary <code>.bgcode</code>!
+                </p>
+              </div>
 
-          <div style={{ marginBottom: '1rem', display: 'flex', gap: '1rem' }}>
-            <div style={{ flex: 1 }}>
-              <label className="label">Trigger Signal</label>
-              <select 
-                className="input-field" 
-                name="triggerSignal" 
-                value={config.triggerSignal} 
-                onChange={handleChange}
-                style={{ width: '100%' }}
+              <button
+                type="button"
+                className={`btn btn-small ${copiedSnippet ? 'btn-primary' : 'btn-secondary'}`}
+                style={{ width: '100%', padding: '8px 12px', fontSize: '0.78rem' }}
+                onClick={handleCopySnippet}
               >
-                <option value="m220">PrusaLink Speed (M220 S99)</option>
-                <option value="m221">PrusaLink Flow (M221 S99)</option>
-                <option value="gpio0">Hackerboard GPIO (M264 P0 S1)</option>
-                <option value="serial">USB Serial (M118)</option>
-              </select>
+                {copiedSnippet ? '✓ Copied to Clipboard!' : 'Copy "After Layer Change" G-Code'}
+              </button>
             </div>
-          </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
-            <div>
-              <label className="label">{triggerType === 'snap' ? 'Target X (mm)' : 'Park X (mm)'}</label>
-              <input type="number" className="input-field" name="parkX" value={config.parkX} onChange={handleChange} />
-            </div>
-            <div>
-              <label className="label">{triggerType === 'snap' ? 'Target Y (mm)' : 'Park Y (mm)'}</label>
-              <input type="number" className="input-field" name="parkY" value={config.parkY} onChange={handleChange} />
-            </div>
-            <div>
-              <label className="label">Travel (mm/m)</label>
-              <input type="number" className="input-field" name="travelSpeed" value={config.travelSpeed} onChange={handleChange} />
-            </div>
-            <div>
-              <label className="label">Z-Hop (mm)</label>
-              <input type="number" step="0.1" className="input-field" name="zHopHeight" value={config.zHopHeight} onChange={handleChange} />
-            </div>
-            <div>
-              <label className="label">Retract Dist (mm)</label>
-              <input type="number" step="0.1" className="input-field" name="retractDistance" value={config.retractDistance} onChange={handleChange} />
-            </div>
-            <div>
-              <label className="label">Retract Speed (mm/m)</label>
-              <input type="number" className="input-field" name="retractSpeed" value={config.retractSpeed} onChange={handleChange} />
-            </div>
-            <div>
-              <label className="label">Settle (ms)</label>
-              <input type="number" className="input-field" name="settleTime" value={config.settleTime} onChange={handleChange} />
-            </div>
-            <div>
-              <label className="label">Capture (ms)</label>
-              <input type="number" className="input-field" name="captureTime" value={config.captureTime} onChange={handleChange} />
-            </div>
-          </div>
-          
-          <button 
-            className="btn btn-primary" 
-            onClick={handleExport}
-            disabled={files.length === 0 || isExporting}
-            style={{ width: '100%', marginTop: '1.5rem', padding: '0.8rem', opacity: (files.length === 0 || isExporting) ? 0.5 : 1 }}
-          >
-            {files.length === 0 ? 'Upload a file to Process' : (isExporting ? 'Processing...' : 'Inject Triggers & Export G-Code')}
-          </button>
-        </div>
-      </div>
-
-      {files.length > 0 && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '2rem', padding: '1rem', background: 'var(--card-bg)', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-            <span style={{ color: '#aaa' }}>Active {files.length > 1 ? 'Models' : 'Model'}:</span>
-            <select className="input-field" style={{ minWidth: '300px' }}>
-              {files.map((f, i) => <option key={i}>Uploaded: {f.name}</option>)}
-            </select>
-            <button 
-              className="btn btn-ghost" 
-              style={{ fontSize: '0.8rem', padding: '4px 8px', color: '#ff4444' }}
-              onClick={() => {
-                setFiles([]);
-                setParsedGcode(null);
-                setDownloadData(null);
+            {/* Option 3: Instant 1-Step .gcode Drop Zone */}
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDragging(true);
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                setIsDragging(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragging(false);
+                if (e.dataTransfer.files?.length > 0) {
+                  handleProcessFile(e.dataTransfer.files[0]);
+                }
+              }}
+              onClick={() => fileInputRef.current?.click()}
+              style={{
+                background: isDragging ? 'rgba(250,104,49,0.1)' : 'rgba(255,255,255,0.025)',
+                border: `1.5px dashed ${isDragging ? 'var(--color-orange)' : 'rgba(255,255,255,0.18)'}`,
+                borderRadius: '10px',
+                padding: '16px',
+                cursor: 'pointer',
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'space-between',
+                gap: '10px',
+                transition: 'all 0.2s ease'
               }}
             >
-              Clear Uploaded Files
-            </button>
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={(e) => {
+                  if (e.target.files?.length > 0) {
+                    handleProcessFile(e.target.files[0]);
+                    e.target.value = '';
+                  }
+                }}
+                accept=".gcode"
+                style={{ display: 'none' }}
+              />
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}>
+                  <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text-primary)' }}>
+                    3. Quick .gcode File Drop
+                  </span>
+                  <span style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', border: '1px solid rgba(255,255,255,0.12)', padding: '1px 7px', borderRadius: '10px' }}>
+                    ASCII .gcode
+                  </span>
+                </div>
+                <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.45 }}>
+                  Drop or click to select a <code>.gcode</code> file — triggers are injected and downloaded immediately in one click.
+                </p>
+              </div>
+
+              <div style={{ fontSize: '0.78rem', color: 'var(--color-orange)', fontWeight: 600, textAlign: 'center', padding: '6px', background: 'rgba(250,104,49,0.08)', borderRadius: '6px' }}>
+                {isProcessing ? 'Injecting triggers…' : 'Drop .gcode here or Click to Browse'}
+              </div>
+            </div>
           </div>
-          {triggerType === 'park' && (
-            <div style={{ color: '#888', fontSize: '0.9rem' }}>
-              Extruder Position: <span style={{ color: '#2ecc71', fontWeight: 'bold' }}>X{config.parkX} Y{config.parkY}</span>
+
+          {/* Status Banner for Plugin Install or Processed File */}
+          {pluginStatus && (
+            <div
+              style={{
+                padding: '10px 14px',
+                borderRadius: '8px',
+                fontSize: '0.8rem',
+                background: pluginStatus.ok ? 'rgba(46,204,113,0.1)' : 'rgba(232,83,63,0.12)',
+                border: `1px solid ${pluginStatus.ok ? 'rgba(46,204,113,0.35)' : 'rgba(232,83,63,0.35)'}`,
+                color: pluginStatus.ok ? '#2ecc71' : '#ff6b6b',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: '10px'
+              }}
+            >
+              <span>{pluginStatus.message}</span>
+              <button
+                type="button"
+                className="btn btn-ghost btn-small"
+                style={{ width: 'auto', padding: '2px 8px', fontSize: '0.72rem' }}
+                onClick={() => setPluginStatus(null)}
+              >
+                Dismiss
+              </button>
             </div>
           )}
-        </div>
-      )}
 
-      {parsedGcode || downloadData ? (
-        <div style={{ marginTop: '2rem' }}>
-          {parsedGcode && <GcodePreview3D parsedGcode={parsedGcode} />}
-          {downloadData && (
-            <button 
-              className="btn btn-primary"
-              onClick={() => saveAs(downloadData.blob, downloadData.outName)}
-              style={{ width: '100%', marginTop: '1rem', padding: '1rem', backgroundColor: '#4CAF50' }}
-            >
-              Download Smart G-Code ({downloadData.layersModified ?? 0} layers injected)
-            </button>
+          {lastProcessed && (
+            <div style={{ padding: '10px 14px', borderRadius: '8px', background: 'rgba(46,204,113,0.08)', border: '1px solid rgba(46,204,113,0.28)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', fontSize: '0.8rem' }}>
+              <span>
+                ✓ Injected <strong>{lastProcessed.layersModified}</strong> layer triggers into <code>{lastProcessed.outName}</code>
+              </span>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-small"
+                  style={{ width: 'auto', padding: '4px 10px', fontSize: '0.74rem' }}
+                  onClick={() => {
+                    if (!show3DPreview && !parsedGcode) {
+                      setParsedGcode(parseGcodeForPreview(lastProcessed.outputText));
+                    }
+                    setShow3DPreview(v => !v);
+                  }}
+                >
+                  {show3DPreview ? 'Hide 3D Preview' : '3D Toolpath Preview'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-small"
+                  style={{ width: 'auto', padding: '4px 10px', fontSize: '0.74rem' }}
+                  onClick={() => saveAs(lastProcessed.blob, lastProcessed.outName)}
+                >
+                  Download Again
+                </button>
+              </div>
+            </div>
           )}
+
+          {show3DPreview && parsedGcode && (
+            <div style={{ marginTop: '4px' }}>
+              <GcodePreview3D parsedGcode={parsedGcode} />
+            </div>
+          )}
+
+          {/* Collapsible Advanced Park Settings */}
+          <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '10px' }}>
+            <button
+              type="button"
+              className="btn btn-ghost btn-small"
+              style={{ width: 'auto', padding: '4px 10px', fontSize: '0.74rem', color: 'var(--text-secondary)' }}
+              onClick={() => setShowAdvanced(s => !s)}
+            >
+              {showAdvanced
+                ? 'Hide Advanced Park Coordinates & Timing'
+                : `Customize Park Coordinates & Timing (X${config.parkX} Y${config.parkY}, ${config.captureTime}ms)`}
+            </button>
+
+            {showAdvanced && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(135px, 1fr))', gap: '10px', marginTop: '12px', padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px' }}>
+                <div>
+                  <label className="label" style={{ fontSize: '0.72rem' }}>Park Mode</label>
+                  <select className="input-field" value={triggerType} onChange={(e) => setTriggerType(e.target.value)} style={{ width: '100%', padding: '5px 8px', fontSize: '0.78rem' }}>
+                    <option value="park">Fixed Corner (X/Y)</option>
+                    <option value="snap">Snap to Print</option>
+                    <option value="snap-smooth">Smooth Snap</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="label" style={{ fontSize: '0.72rem' }}>Signal</label>
+                  <select className="input-field" name="triggerSignal" value={config.triggerSignal} onChange={handleChange} style={{ width: '100%', padding: '5px 8px', fontSize: '0.78rem' }}>
+                    <option value="m220">M220 S99 (Speed)</option>
+                    <option value="m221">M221 S99 (Flow)</option>
+                    <option value="gpio0">M264 (GPIO)</option>
+                    <option value="serial">M118 (Serial)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="label" style={{ fontSize: '0.72rem' }}>Park X (mm)</label>
+                  <input type="number" className="input-field" name="parkX" value={config.parkX} onChange={handleChange} style={{ padding: '5px 8px', fontSize: '0.78rem' }} />
+                </div>
+                <div>
+                  <label className="label" style={{ fontSize: '0.72rem' }}>Park Y (mm)</label>
+                  <input type="number" className="input-field" name="parkY" value={config.parkY} onChange={handleChange} style={{ padding: '5px 8px', fontSize: '0.78rem' }} />
+                </div>
+                <div>
+                  <label className="label" style={{ fontSize: '0.72rem' }}>Z-Hop (mm)</label>
+                  <input type="number" step="0.1" className="input-field" name="zHopHeight" value={config.zHopHeight} onChange={handleChange} style={{ padding: '5px 8px', fontSize: '0.78rem' }} />
+                </div>
+                <div>
+                  <label className="label" style={{ fontSize: '0.72rem' }}>Retract (mm)</label>
+                  <input type="number" step="0.1" className="input-field" name="retractDistance" value={config.retractDistance} onChange={handleChange} style={{ padding: '5px 8px', fontSize: '0.78rem' }} />
+                </div>
+                <div>
+                  <label className="label" style={{ fontSize: '0.72rem' }}>Settle (ms)</label>
+                  <input type="number" className="input-field" name="settleTime" value={config.settleTime} onChange={handleChange} style={{ padding: '5px 8px', fontSize: '0.78rem' }} />
+                </div>
+                <div>
+                  <label className="label" style={{ fontSize: '0.72rem' }}>Capture Wait (ms)</label>
+                  <input type="number" className="input-field" name="captureTime" value={config.captureTime} onChange={handleChange} style={{ padding: '5px 8px', fontSize: '0.78rem' }} />
+                </div>
+              </div>
+            )}
+          </div>
         </div>
-      ) : null}
-        </>
       )}
     </div>
   );
