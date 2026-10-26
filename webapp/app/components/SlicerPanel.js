@@ -45,9 +45,10 @@ export default function SlicerPanel() {
         : 'M220 S99 ; Trigger Prusa-lapse capture\nG4 P' + config.captureTime + '\nM220 S100 ; Restore speed';
 
     return [
-      '; --- PRUSA-LAPSE PARKED TRIGGER (works with .bgcode) ---',
-      '{if layer_num > 1}',
-      `G1 E-${config.retractDistance} F${config.retractSpeed} ; Retract`,
+      ';AFTER_LAYER_CHANGE',
+      ';[layer_z]',
+      '{if layer_num > 0}',
+      '; --- PRUSA-LAPSE START ---',
       'G91',
       `G1 Z${config.zHopHeight} F600 ; Z-hop lift`,
       'G90',
@@ -55,8 +56,7 @@ export default function SlicerPanel() {
       `G1 X${config.parkX} Y${config.parkY} F${config.travelSpeed} ; Park toolhead`,
       `G4 P${config.settleTime} ; Settle vibrations`,
       signalCmd,
-      'G1 Z[layer_z] F600 ; Restore layer Z',
-      `G1 E${config.retractDistance} F${config.retractSpeed} ; Un-retract`,
+      '; --- PRUSA-LAPSE END ---',
       '{endif}',
     ].join('\n');
   };
