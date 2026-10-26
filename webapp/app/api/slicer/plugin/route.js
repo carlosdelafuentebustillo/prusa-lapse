@@ -7,45 +7,55 @@ import AdmZip from 'adm-zip';
 
 const PLUGIN_ID = 'com.prusalapse.timelapse';
 
-function getSourcePluginDir() {
-  const repoPluginDir = path.resolve(process.cwd(), '..', 'prusaslicer-plugin', PLUGIN_ID);
-  if (existsSync(repoPluginDir)) return repoPluginDir;
-  return path.resolve(process.cwd(), 'prusaslicer-plugin', PLUGIN_ID);
+function getPluginRootDir() {
+  const repoPluginRoot = path.resolve(process.cwd(), '..', 'prusaslicer-plugin');
+  if (existsSync(repoPluginRoot)) return repoPluginRoot;
+  return path.resolve(process.cwd(), 'prusaslicer-plugin');
 }
 
-function getPrusaSlicerLuaDirs() {
+function getSourcePluginDir() {
+  return path.join(getPluginRootDir(), PLUGIN_ID);
+}
+
+function getPrusaSlicerDataDirs() {
   const home = os.homedir();
   const platform = process.platform;
-  const candidates = [];
+  const folderNames = [
+    'PrusaSlicer3-dev',
+    'PrusaSlicer3',
+    'PrusaSlicer-alpha',
+    'PrusaSlicer-beta',
+    'PrusaSlicer'
+  ];
 
+  let baseDir;
   if (platform === 'win32') {
-    const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
-    candidates.push(
-      path.join(appData, 'PrusaSlicer', 'lua'),
-      path.join(appData, 'PrusaSlicer-alpha', 'lua'),
-      path.join(appData, 'PrusaSlicer-beta', 'lua')
-    );
+    baseDir = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
   } else if (platform === 'darwin') {
-    const appSupport = path.join(home, 'Library', 'Application Support');
-    candidates.push(
-      path.join(appSupport, 'PrusaSlicer', 'lua'),
-      path.join(appSupport, 'PrusaSlicer-alpha', 'lua'),
-      path.join(appSupport, 'PrusaSlicer-beta', 'lua')
-    );
+    baseDir = path.join(home, 'Library', 'Application Support');
   } else {
-    const configHome = process.env.XDG_CONFIG_HOME || path.join(home, '.config');
-    candidates.push(
-      path.join(configHome, 'PrusaSlicer', 'lua'),
-      path.join(configHome, 'PrusaSlicer-alpha', 'lua'),
-      path.join(configHome, 'PrusaSlicer-beta', 'lua')
-    );
+    baseDir = process.env.XDG_CONFIG_HOME || path.join(home, '.config');
   }
 
-  return candidates;
+  return folderNames.map(name => path.join(baseDir, name));
 }
 
 export async function GET() {
   try {
+    const pluginRoot = getPluginRootDir();
+    const preSignedZipPath = path.join(pluginRoot, `${PLUGIN_ID}.zip`);
+
+    if (existsSync(preSignedZipPath)) {
+      const buffer = await fs.readFile(preSignedZipPath);
+      return new Response(buffer, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="${PLUGIN_ID}.zip"`
+        }
+      });
+    }
+
     const srcDir = getSourcePluginDir();
     const manifestPath = path.join(srcDir, 'manifest.json');
     const luaPath = path.join(srcDir, 'prusalapse.lua');
@@ -55,8 +65,10 @@ export async function GET() {
     }
 
     const zip = new AdmZip();
-    zip.addLocalFile(manifestPath, PLUGIN_ID);
-    zip.addLocalFile(luaPath, PLUGIN_ID);
+    const files = await fs.readdir(srcDir);
+    for (const f of files) {
+      zip.addLocalFile(path.join(srcDir, f));
+    }
     const buffer = zip.toBuffer();
 
     return new Response(buffer, {
@@ -73,26 +85,33 @@ export async function GET() {
 
 export async function POST() {
   try {
+    const pluginRoot = getPluginRootDir();
     const srcDir = getSourcePluginDir();
-    const manifestPath = path.join(srcDir, 'manifest.json');
-    const luaPath = path.join(srcDir, 'prusalapse.lua');
+    const pubKeyPath = path.join(pluginRoot, 'prusalapse.pub.pem');
 
-    if (!existsSync(manifestPath) || !existsSync(luaPath)) {
+    if (!existsSync(srcDir)) {
       return NextResponse.json({ error: 'Plugin source files not found' }, { status: 404 });
     }
 
-    const luaDirs = getPrusaSlicerLuaDirs();
+    const bundleFiles = await fs.readdir(srcDir);
+    const dataDirs = getPrusaSlicerDataDirs();
     const installedPaths = [];
 
-    // Install to primary PrusaSlicer dir, plus any existing alpha/beta dirs
-    for (let i = 0; i < luaDirs.length; i++) {
-      const luaBaseDir = luaDirs[i];
-      const parentDir = path.dirname(luaBaseDir);
-      if (i === 0 || existsSync(parentDir)) {
-        const targetBundleDir = path.join(luaBaseDir, PLUGIN_ID);
+    for (let i = 0; i < dataDirs.length; i++) {
+      const dataDir = dataDirs[i];
+      if (i === 0 || existsSync(dataDir)) {
+        const targetBundleDir = path.join(dataDir, 'lua', PLUGIN_ID);
         await fs.mkdir(targetBundleDir, { recursive: true });
-        await fs.copyFile(manifestPath, path.join(targetBundleDir, 'manifest.json'));
-        await fs.copyFile(luaPath, path.join(targetBundleDir, 'prusalapse.lua'));
+        for (const f of bundleFiles) {
+          await fs.copyFile(path.join(srcDir, f), path.join(targetBundleDir, f));
+        }
+
+        if (existsSync(pubKeyPath)) {
+          const authDir = path.join(dataDir, 'authorized_authors');
+          await fs.mkdir(authDir, { recursive: true });
+          await fs.copyFile(pubKeyPath, path.join(authDir, 'prusalapse.pem'));
+        }
+
         installedPaths.push(targetBundleDir);
       }
     }

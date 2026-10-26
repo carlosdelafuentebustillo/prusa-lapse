@@ -3,9 +3,9 @@
 -- enabling full Binary G-code (.bgcode) compatibility, 3D thumbnails, and direct PrusaLink upload.
 
 info = {
-    id = "com.prusalapse.timelapse",
+    id = "parked_timelapse",
     type = "project.plugin",
-    title = "Configure Parked Timelapse (Prusa-lapse)",
+    title = "Configure Parked Timelapse",
     menu = "Prusa-lapse/Configure Parked Timelapse",
     params = {
         {
