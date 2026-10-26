@@ -568,11 +568,27 @@ class MonitorService {
         const camDir = path.join(sessionDir, `camera_${i}`);
         await fs.mkdir(camDir, { recursive: true });
 
+        // If no explicit targetSessionId was provided, find the latest sXXXX prefix on the SD card
+        // so multiple sessions on the SD card never overwrite each other's frame_XXXX.jpg files!
+        let effectiveSessionId = targetSessionId;
+        if (!effectiveSessionId) {
+          const prefixes = new Set();
+          for (const f of files) {
+            const base = f.split('/').pop();
+            const m = base.match(/^(s\d{4})_/);
+            if (m) prefixes.add(m[1]);
+          }
+          if (prefixes.size > 0) {
+            const sortedPrefixes = Array.from(prefixes).sort();
+            effectiveSessionId = sortedPrefixes[sortedPrefixes.length - 1];
+          }
+        }
+
         // Fast path: Check if the TAR file exists!
-        if (targetSessionId && files.some(f => f.includes(`${targetSessionId}.tar`))) {
-          this.log(`Camera ${i} (${ip}) found pre-packed ${targetSessionId}.tar! Fast downloading...`, 'success');
+        if (effectiveSessionId && files.some(f => f.includes(`${effectiveSessionId}.tar`))) {
+          this.log(`Camera ${i} (${ip}) found pre-packed ${effectiveSessionId}.tar! Fast downloading...`, 'success');
           try {
-            const tarRes = await fetch(`http://${ip}/download_sd?file=${targetSessionId}.tar`, {
+            const tarRes = await fetch(`http://${ip}/download_sd?file=${effectiveSessionId}.tar`, {
               headers: { 'Connection': 'close' }
             });
             if (tarRes.ok) {
@@ -583,7 +599,7 @@ class MonitorService {
                 totalCameras: config.cameraIps.length
               };
               
-              const tarPath = path.join(camDir, `${targetSessionId}.tar`);
+              const tarPath = path.join(camDir, `${effectiveSessionId}.tar`);
               const totalBytes = Number(tarRes.headers.get('content-length')) || 0;
               let downloadedBytes = 0;
               
@@ -634,8 +650,8 @@ class MonitorService {
 
         const targetFiles = files.filter(f => {
           const file = f.split('/').pop();
-          if (file === 'sessions.jsonl' || file === 'config.txt') return false;
-          if (targetSessionId && !file.startsWith(targetSessionId + '_')) return false;
+          if (file === 'sessions.jsonl' || file === 'config.txt' || file.endsWith('.tar') || file.endsWith('.tmp')) return false;
+          if (effectiveSessionId && !file.startsWith(effectiveSessionId + '_')) return false;
           return true;
         });
         
@@ -651,8 +667,8 @@ class MonitorService {
 
         for (const fileStr of files) {
           const file = fileStr.split('/').pop(); // Ensure it's just the filename
-          if (file === 'sessions.jsonl' || file === 'config.txt') continue;
-          if (targetSessionId && !file.startsWith(targetSessionId + '_')) continue;
+          if (file === 'sessions.jsonl' || file === 'config.txt' || file.endsWith('.tar') || file.endsWith('.tmp')) continue;
+          if (effectiveSessionId && !file.startsWith(effectiveSessionId + '_')) continue;
           try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -864,9 +880,10 @@ class MonitorService {
               
               if (res.ok) {
                 const text = await res.text();
-                const lines = text.split('\n');
-                for (const line of lines) {
-                  if (line.trim()) {
+                const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+                for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+                  const line = lines[lineIdx];
+                  if (line) {
                     try {
                       const data = JSON.parse(line);
                       let timestamp = data.timestamp;
@@ -882,11 +899,16 @@ class MonitorService {
                           const sec = parseInt(timestamp.substring(13, 15), 10);
                           targetDate = new Date(year, month, day, hour, min, sec);
                         } catch (e) {
-                          targetDate = new Date();
-                          timestamp = generateSessionTimestamp(targetDate);
+                          targetDate = null;
                         }
-                      } else {
-                        targetDate = new Date();
+                      }
+
+                      if (!targetDate) {
+                        // When a session entry in sessions.jsonl lacks a timestamp, derive a distinct
+                        // fallback timestamp per session index so s0001 and s0002 never collide!
+                        const sessNum = parseInt(String(data.session || '').replace(/\D+/g, ''), 10) || (lineIdx + 1);
+                        const baseMs = Date.now() - Math.max(0, (lines.length - lineIdx)) * 3600000;
+                        targetDate = new Date(baseMs + sessNum * 1000);
                         timestamp = generateSessionTimestamp(targetDate);
                       }
                       
@@ -894,8 +916,14 @@ class MonitorService {
                       const alreadyFetched = sessions.some(s => s.timestamp === timestamp && !s.isRemote);
                       
                       if (!alreadyFetched) {
+                        // Only merge remote sessions across DIFFERENT cameras when they represent the same print
                         const existingRemote = this.remoteSessionsCache.find(s => {
-                          return Math.abs(s.originalDate - targetDate.getTime()) < 120000;
+                          if (s.remoteSessionIds && s.remoteSessionIds[ip]) return false; // Never merge two sessions from the same camera!
+                          if (data.job_id && s.jobId && data.job_id === s.jobId) return true;
+                          if (data.timestamp && s.hasExplicitTimestamp && Math.abs(s.originalDate - targetDate.getTime()) < 120000) return true;
+                          const existingSid = Object.values(s.remoteSessionIds || {})[0];
+                          if (!data.timestamp && !s.hasExplicitTimestamp && existingSid && existingSid === data.session) return true;
+                          return false;
                         });
                         const remoteMeta = data.job_name ? parsePrusaFilename(data.job_name) : null;
                         
@@ -905,8 +933,9 @@ class MonitorService {
                           if (!existingRemote.meta && remoteMeta) existingRemote.meta = remoteMeta;
                         } else {
                           this.remoteSessionsCache.push({
-                            id: `remote_${timestamp}`,
+                            id: `remote_${timestamp}_${data.session || lineIdx}`,
                             timestamp: timestamp,
+                            hasExplicitTimestamp: Boolean(data.timestamp && data.timestamp.length >= 15),
                             originalDate: targetDate.getTime(),
                             isOffline: true,
                             isRemote: true,
@@ -937,28 +966,113 @@ class MonitorService {
     }
   }
 
-  async compileVideo(sessionId, cameraIndex, options = { fps: 30, quality: 23 }) {
+  async compileVideo(sessionId, cameraIndex, options = { fps: 30, quality: 23, rotation: 0, filterDark: true }) {
     this.isCompiling = true;
-    this.log(`Starting video compilation for ${sessionId} (Camera ${cameraIndex})...`, 'info');
+    const fps = Number(options?.fps) || 30;
+    const quality = Number(options?.quality) || 23;
+    const rotation = Number(options?.rotation) || 0;
+    const filterDark = options?.filterDark !== false;
+
+    this.log(`Starting video compilation for ${sessionId} (Camera ${cameraIndex}, ${fps} FPS, rot=${rotation}°)...`, 'info');
     
-    const inputPattern = path.join(CAPTURES_DIR, sessionId, `camera_${cameraIndex}`, 'frame_%04d.jpg');
+    const camDir = path.join(CAPTURES_DIR, sessionId, `camera_${cameraIndex}`);
     const outputPath = path.join(CAPTURES_DIR, sessionId, `camera_${cameraIndex}.mp4`);
-    
     const ffmpegPath = getFFmpegPath();
-    const cmd = `"${ffmpegPath}" -y -framerate ${options.fps} -i "${inputPattern}" -c:v libx264 -crf ${options.quality} -pix_fmt yuv420p "${outputPath}"`;
-    
-    return new Promise((resolve, reject) => {
-      exec(cmd, (error, stdout, stderr) => {
+
+    try {
+      const allFiles = await fs.readdir(camDir);
+      const frameFiles = allFiles
+        .filter(f => /^frame_\d+\.jpg$/i.test(f))
+        .sort((a, b) => {
+          const na = parseInt(a.replace(/\D+/g, ''), 10) || 0;
+          const nb = parseInt(b.replace(/\D+/g, ''), 10) || 0;
+          return na - nb;
+        });
+
+      if (frameFiles.length === 0) {
         this.isCompiling = false;
-        if (error) {
-          this.log(`FFmpeg failed: ${error.message}`, 'error');
-          reject(error);
-        } else {
-          this.log(`Video compiled successfully: camera_${cameraIndex}.mp4`, 'success');
-          resolve(outputPath);
+        throw new Error(`No frame_*.jpg files found in camera_${cameraIndex}`);
+      }
+
+      // 1. Pre-filter empty or severely truncated files (<15 KB)
+      const nonEmptyFrames = [];
+      for (const f of frameFiles) {
+        try {
+          const st = await fs.stat(path.join(camDir, f));
+          if (st.size >= 15000) {
+            nonEmptyFrames.push(f);
+          }
+        } catch (e) {}
+      }
+
+      let validFrames = nonEmptyFrames;
+
+      // 2. Pixel-level dark/green frame detection via FFmpeg blackframe filter (pblack >= 70% at threshold=40)
+      if (filterDark && nonEmptyFrames.length > 3) {
+        const analyzeListPath = path.join(camDir, '_ffmpeg_analyze.txt');
+        const analyzeContent = nonEmptyFrames.map(f => `file '${path.join(camDir, f).replace(/\\/g, '/')}'`).join('\n') + '\n';
+        await fs.writeFile(analyzeListPath, analyzeContent, 'utf-8');
+
+        const darkIndices = new Set();
+        await new Promise((resolve) => {
+          const analyzeCmd = `"${ffmpegPath}" -hide_banner -f concat -safe 0 -i "${analyzeListPath}" -vf "blackframe=amount=0:threshold=40" -f null -`;
+          exec(analyzeCmd, { cwd: camDir, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
+            const output = (stderr || '') + '\n' + (stdout || '');
+            const regex = /frame:\s*(\d+)\s+pblack:\s*(\d+)/g;
+            let match;
+            while ((match = regex.exec(output)) !== null) {
+              const idx = parseInt(match[1], 10);
+              const pblack = parseInt(match[2], 10);
+              if (pblack >= 70) {
+                darkIndices.add(idx);
+              }
+            }
+            resolve();
+          });
+        });
+
+        await fs.rm(analyzeListPath, { force: true }).catch(() => {});
+
+        if (darkIndices.size > 0 && darkIndices.size < nonEmptyFrames.length) {
+          validFrames = nonEmptyFrames.filter((_, idx) => !darkIndices.has(idx));
+          this.log(`Filtered ${darkIndices.size} dark/underexposed frames from camera_${cameraIndex} (${validFrames.length} clean frames kept).`, 'info');
         }
+      }
+
+      // 3. Write FFmpeg concat demuxer file so missing frame numbers never truncate the video
+      const concatListPath = path.join(camDir, '_ffmpeg_concat.txt');
+      const concatLines = validFrames.map(f => `file '${path.join(camDir, f).replace(/\\/g, '/')}'`);
+      await fs.writeFile(concatListPath, concatLines.join('\n') + '\n', 'utf-8');
+
+      // 4. Optional rotation filter (90° CW = transpose=1, 90° CCW = transpose=2, 180° = hflip,vflip)
+      let vfArg = '';
+      if (rotation === 90) {
+        vfArg = '-vf "transpose=1" ';
+      } else if (rotation === 270) {
+        vfArg = '-vf "transpose=2" ';
+      } else if (rotation === 180) {
+        vfArg = '-vf "hflip,vflip" ';
+      }
+
+      const cmd = `"${ffmpegPath}" -y -r ${fps} -f concat -safe 0 -i "${concatListPath}" ${vfArg}-c:v libx264 -crf ${quality} -pix_fmt yuv420p "${outputPath}"`;
+
+      return await new Promise((resolve, reject) => {
+        exec(cmd, { cwd: camDir, maxBuffer: 16 * 1024 * 1024 }, async (error) => {
+          this.isCompiling = false;
+          await fs.rm(concatListPath, { force: true }).catch(() => {});
+          if (error) {
+            this.log(`FFmpeg failed: ${error.message}`, 'error');
+            reject(error);
+          } else {
+            this.log(`Video compiled successfully: camera_${cameraIndex}.mp4 (${validFrames.length} frames)`, 'success');
+            resolve(outputPath);
+          }
+        });
       });
-    });
+    } catch (err) {
+      this.isCompiling = false;
+      throw err;
+    }
   }
 
   async deleteSession(sessionId) {

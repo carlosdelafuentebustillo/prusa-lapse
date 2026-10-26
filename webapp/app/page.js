@@ -45,7 +45,8 @@ export default function Home() {
   const [logs, setLogs] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [compilingStatus, setCompilingStatus] = useState(null);
-  const [compileOptions, setCompileOptions] = useState({ fps: 30, quality: 23 });
+  const [compileOptions, setCompileOptions] = useState({ fps: 30, quality: 23, filterDark: true });
+  const [cameraRotations, setCameraRotations] = useState({ 0: 0, 1: 90 });
   const [activeVideo, setActiveVideo] = useState(null);
   const [frameCount, setFrameCount] = useState(0);
   const [currentSession, setCurrentSession] = useState(null);
@@ -458,11 +459,16 @@ export default function Home() {
 
   const handleCompile = async (sessionId, cameraIndex) => {
     setCompilingStatus({ sessionId, cameraIndex });
+    const rotation = cameraRotations[cameraIndex] ?? (cameraIndex === 1 ? 90 : 0);
     try {
       const res = await fetch('/api/compile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, cameraIndex, options: compileOptions })
+        body: JSON.stringify({
+          sessionId,
+          cameraIndex,
+          options: { ...compileOptions, rotation }
+        })
       });
       if (res.ok) {
         fetchSessions();
@@ -810,7 +816,20 @@ export default function Home() {
                     <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>{cam.frameCount} frames</div>
                   </div>
 
-                  <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <select
+                      className="input-field"
+                      style={{ width: 'auto', padding: '4px 6px', fontSize: '0.72rem' }}
+                      value={cameraRotations[idx] ?? (idx === 1 ? 90 : 0)}
+                      onChange={(e) => setCameraRotations(prev => ({ ...prev, [idx]: parseInt(e.target.value, 10) }))}
+                      title="Video Rotation"
+                    >
+                      <option value="0">0°</option>
+                      <option value="90">90° CW</option>
+                      <option value="270">90° CCW</option>
+                      <option value="180">180°</option>
+                    </select>
+
                     {hasVideo && (
                       <button
                         className="btn btn-primary btn-small"
