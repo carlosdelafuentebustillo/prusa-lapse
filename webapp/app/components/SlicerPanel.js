@@ -37,25 +37,29 @@ export default function SlicerPanel() {
   const buildPrusaSlicerSnippet = () => {
     const signalCmd =
       config.triggerSignal === 'm221'
-        ? 'M221 S99 ; Trigger Prusa-lapse capture\nG4 P' + config.captureTime + '\nM221 S100 ; Restore flow'
+        ? 'M221 S99 ; Trigger Prusa-lapse capture via flow factor\nG4 P' + config.captureTime + ' ; Wait for camera capture\nM221 S100 ; Restore 100% flow'
         : config.triggerSignal === 'gpio0'
         ? 'M264 P0 S1\nG4 P100\nM264 P0 S0\nG4 P' + config.captureTime
         : config.triggerSignal === 'serial'
         ? 'M118 action:capture_photo\nG4 P' + config.captureTime
-        : 'M220 S99 ; Trigger Prusa-lapse capture\nG4 P' + config.captureTime + '\nM220 S100 ; Restore speed';
+        : 'M220 S99 ; Trigger Prusa-lapse capture via speed factor\nG4 P' + config.captureTime + ' ; Wait for camera capture\nM220 S100 ; Restore 100% speed';
 
     return [
       ';AFTER_LAYER_CHANGE',
       ';[layer_z]',
       '{if layer_num > 0}',
       '; --- PRUSA-LAPSE START ---',
-      'G91',
-      `G1 Z${config.zHopHeight} F600 ; Z-hop lift`,
-      'G90',
-      'M83',
+      'M83 ; Relative extrusion',
+      `G1 E-${config.retractDistance} F${config.retractSpeed} ; Retract to prevent oozing during park`,
+      'G91 ; Relative positioning',
+      `G1 Z${config.zHopHeight} F1200 ; Z-hop lift`,
+      'G90 ; Absolute positioning',
       `G1 X${config.parkX} Y${config.parkY} F${config.travelSpeed} ; Park toolhead`,
-      `G4 P${config.settleTime} ; Settle vibrations`,
+      'M400 ; Wait for park move to complete',
+      `G4 P${config.settleTime} ; Settle frame vibrations`,
       signalCmd,
+      'G1 Z[layer_z] F1200 ; Restore exact layer Z height',
+      `G1 E${config.retractDistance} F${config.retractSpeed} ; Un-retract filament`,
       '; --- PRUSA-LAPSE END ---',
       '{endif}',
     ].join('\n');
@@ -227,19 +231,19 @@ export default function SlicerPanel() {
               </div>
             </div>
 
-            {/* Option 2: PrusaSlicer 2.8 / 2.9 / 3.0 Custom G-Code Preset */}
-            <div style={{ background: 'rgba(255,255,255,0.025)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '10px', padding: '16px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '12px' }}>
+            {/* Option 2: PrusaSlicer Native Custom G-Code Preset */}
+            <div style={{ background: 'rgba(255,255,255,0.025)', border: '1px solid rgba(46,204,113,0.3)', borderRadius: '10px', padding: '16px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '12px' }}>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}>
                   <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text-primary)' }}>
-                    2. PrusaSlicer Preset Snippet
+                    ⭐ Recommended: PrusaSlicer Preset
                   </span>
                   <span style={{ fontSize: '0.68rem', background: 'rgba(46,204,113,0.15)', color: '#2ecc71', border: '1px solid rgba(46,204,113,0.35)', padding: '1px 7px', borderRadius: '10px', fontWeight: 600 }}>
-                    v2.8 / v2.9 &amp; .bgcode
+                    100% Native &amp; .bgcode
                   </span>
                 </div>
                 <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.45 }}>
-                  Paste once into <strong>Printer Settings → Custom G-code → After layer change G-code</strong>. Works automatically on every slice including binary <code>.bgcode</code>!
+                  Paste once into <strong>Printer Settings → Custom G-code → After layer change G-code</strong>. Works natively across all PrusaSlicer versions and directly exports binary <code>.bgcode</code>!
                 </p>
               </div>
 
