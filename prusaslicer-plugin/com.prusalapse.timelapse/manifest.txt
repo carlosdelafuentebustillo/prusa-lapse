@@ -1,2 +1,2 @@
 26c1acb5889d1383743aba44d7a6f3dfa91a0aba6618e4c561d4dd6e257e761f  manifest.json
-20204bc4fdf1b0a0883c8fd88c7c0a9ddfd2d937e8cb3b1e724efbb1fc1293ad  prusalapse.lua
+376c0dc6e0b9298caf8500e788eca282ce1fed57042a7b6f11a1ef67132f90ea  prusalapse.lua
