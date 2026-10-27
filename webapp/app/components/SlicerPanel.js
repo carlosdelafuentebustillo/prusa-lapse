@@ -16,8 +16,7 @@ export default function SlicerPanel() {
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [lastProcessed, setLastProcessed] = useState(null);
-  const [pluginStatus, setPluginStatus] = useState(null);
-  const [isInstallingPlugin, setIsInstallingPlugin] = useState(false);
+  const [panelStatus, setPanelStatus] = useState(null);
   const [copiedSnippet, setCopiedSnippet] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -73,41 +72,20 @@ export default function SlicerPanel() {
     } catch (e) {}
   };
 
-  const handleInstallPlugin = async () => {
-    setIsInstallingPlugin(true);
-    setPluginStatus(null);
-    try {
-      const res = await fetch('/api/slicer/plugin', { method: 'POST' });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setPluginStatus({
-          ok: true,
-          message: `Installed to ${data.installedPaths?.[0] || 'PrusaSlicer/lua'}. In PrusaSlicer 3.0+, click Plugins → Rescan.`
-        });
-      } else {
-        setPluginStatus({ ok: false, message: data.error || 'Failed to install plugin' });
-      }
-    } catch (e) {
-      setPluginStatus({ ok: false, message: e.message });
-    } finally {
-      setIsInstallingPlugin(false);
-    }
-  };
-
   const handleProcessFile = async (selectedFile) => {
     if (!selectedFile) return;
     const name = selectedFile.name.toLowerCase();
 
     if (name.endsWith('.bgcode')) {
-      setPluginStatus({
+      setPanelStatus({
         ok: false,
-        message: 'Binary .bgcode files are compressed. Use Option 1 (PrusaSlicer 3.0 Plugin) or Option 2 (Copy Snippet into PrusaSlicer) so PrusaSlicer injects triggers before creating the .bgcode file!'
+        message: 'Binary .bgcode files are compressed. Paste the PrusaSlicer Preset snippet into your printer profile so PrusaSlicer injects triggers directly when creating the .bgcode file!'
       });
       return;
     }
 
     if (!name.endsWith('.gcode')) {
-      setPluginStatus({ ok: false, message: 'Please select a .gcode file.' });
+      setPanelStatus({ ok: false, message: 'Please select a .gcode file.' });
       return;
     }
 
@@ -127,7 +105,7 @@ export default function SlicerPanel() {
         layersModified: result.layersModified
       });
     } catch (error) {
-      setPluginStatus({ ok: false, message: 'Error processing G-code: ' + error.message });
+      setPanelStatus({ ok: false, message: 'Error processing G-code: ' + error.message });
     } finally {
       setIsProcessing(false);
     }
@@ -162,7 +140,7 @@ export default function SlicerPanel() {
             <polyline points="2 17 12 22 22 17" />
             <polyline points="2 12 12 17 22 12" />
           </svg>
-          Parked Timelapse Setup (PrusaSlicer Plugin &amp; G-Code)
+          Parked Timelapse Setup (PrusaSlicer Custom G-Code)
           <span style={{ fontSize: '0.75rem', fontWeight: 400, color: 'var(--text-secondary)', marginLeft: '6px' }}>
             (Optional — Smart Z works automatically without this)
           </span>
@@ -191,52 +169,14 @@ export default function SlicerPanel() {
             Your cameras already capture layer changes automatically via <strong>Smart Z</strong>. Only use one of the options below if you want <strong>Parked-Head Timelapses</strong> (moving the extruder to <code>X{config.parkX} Y{config.parkY}</code> on every layer so the print appears to grow by magic).
           </div>
 
-          {/* 3 Simple Workflow Cards */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '14px' }}>
-            {/* Option 1: PrusaSlicer 3.0 Lua Plugin */}
-            <div style={{ background: 'rgba(255,255,255,0.025)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '10px', padding: '16px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '12px' }}>
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}>
-                  <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text-primary)' }}>
-                    1. PrusaSlicer 3.0 Lua Plugin
-                  </span>
-                  <span style={{ fontSize: '0.68rem', background: 'rgba(250,104,49,0.15)', color: 'var(--color-orange)', border: '1px solid rgba(250,104,49,0.35)', padding: '1px 7px', borderRadius: '10px', fontWeight: 600 }}>
-                    Supports .bgcode
-                  </span>
-                </div>
-                <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.45 }}>
-                  Installs <code>com.prusalapse.timelapse</code> directly into PrusaSlicer&apos;s <code>lua/</code> plugins folder. Run from <strong>Plugins → Prusa-lapse</strong> before slicing.
-                </p>
-              </div>
-
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                <button
-                  type="button"
-                  className="btn btn-primary btn-small"
-                  style={{ flex: 1, padding: '8px 12px', fontSize: '0.78rem' }}
-                  onClick={handleInstallPlugin}
-                  disabled={isInstallingPlugin}
-                >
-                  {isInstallingPlugin ? 'Installing…' : '1-Click Install Plugin'}
-                </button>
-                <a
-                  href="/api/slicer/plugin"
-                  download="com.prusalapse.timelapse.zip"
-                  className="btn btn-ghost btn-small"
-                  style={{ width: 'auto', padding: '8px 10px', fontSize: '0.75rem', textDecoration: 'none' }}
-                  title="Download Plugin Bundle (.zip)"
-                >
-                  .ZIP ↓
-                </a>
-              </div>
-            </div>
-
-            {/* Option 2: PrusaSlicer Native Custom G-Code Preset */}
+          {/* 2 Simple Workflow Cards */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '14px' }}>
+            {/* Option 1: PrusaSlicer Native Custom G-Code Preset */}
             <div style={{ background: 'rgba(255,255,255,0.025)', border: '1px solid rgba(46,204,113,0.3)', borderRadius: '10px', padding: '16px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '12px' }}>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}>
                   <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text-primary)' }}>
-                    ⭐ Recommended: PrusaSlicer Preset
+                    ⭐ 1. PrusaSlicer Preset (Recommended)
                   </span>
                   <span style={{ fontSize: '0.68rem', background: 'rgba(46,204,113,0.15)', color: '#2ecc71', border: '1px solid rgba(46,204,113,0.35)', padding: '1px 7px', borderRadius: '10px', fontWeight: 600 }}>
                     100% Native &amp; .bgcode
@@ -257,7 +197,7 @@ export default function SlicerPanel() {
               </button>
             </div>
 
-            {/* Option 3: Instant 1-Step .gcode Drop Zone */}
+            {/* Option 2: Instant 1-Step .gcode Drop Zone */}
             <div
               onDragOver={(e) => {
                 e.preventDefault();
@@ -303,7 +243,7 @@ export default function SlicerPanel() {
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}>
                   <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text-primary)' }}>
-                    3. Quick .gcode File Drop
+                    2. Quick .gcode File Drop
                   </span>
                   <span style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', border: '1px solid rgba(255,255,255,0.12)', padding: '1px 7px', borderRadius: '10px' }}>
                     ASCII .gcode
@@ -320,28 +260,28 @@ export default function SlicerPanel() {
             </div>
           </div>
 
-          {/* Status Banner for Plugin Install or Processed File */}
-          {pluginStatus && (
+          {/* Status Banner */}
+          {panelStatus && (
             <div
               style={{
                 padding: '10px 14px',
                 borderRadius: '8px',
                 fontSize: '0.8rem',
-                background: pluginStatus.ok ? 'rgba(46,204,113,0.1)' : 'rgba(232,83,63,0.12)',
-                border: `1px solid ${pluginStatus.ok ? 'rgba(46,204,113,0.35)' : 'rgba(232,83,63,0.35)'}`,
-                color: pluginStatus.ok ? '#2ecc71' : '#ff6b6b',
+                background: panelStatus.ok ? 'rgba(46,204,113,0.1)' : 'rgba(232,83,63,0.12)',
+                border: `1px solid ${panelStatus.ok ? 'rgba(46,204,113,0.35)' : 'rgba(232,83,63,0.35)'}`,
+                color: panelStatus.ok ? '#2ecc71' : '#ff6b6b',
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
                 gap: '10px'
               }}
             >
-              <span>{pluginStatus.message}</span>
+              <span>{panelStatus.message}</span>
               <button
                 type="button"
                 className="btn btn-ghost btn-small"
                 style={{ width: 'auto', padding: '2px 8px', fontSize: '0.72rem' }}
-                onClick={() => setPluginStatus(null)}
+                onClick={() => setPanelStatus(null)}
               >
                 Dismiss
               </button>
