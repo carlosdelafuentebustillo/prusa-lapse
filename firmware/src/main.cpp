@@ -21,8 +21,8 @@ String prusaConnectFingerprint = "";
 int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
-#define VERSION_MINOR 10
-#define FIRMWARE_VERSION "v1.2.5"
+#define VERSION_MINOR 11
+#define FIRMWARE_VERSION "v1.2.7"
 
 bool offlineMode = false;
 bool sdCardAvailable = false;
@@ -312,6 +312,21 @@ void setupCamera();
 #define VSYNC_GPIO_NUM    25
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
+
+// Self-freeing response for PSRAM buffers; frees memory immediately when response transmission finishes or aborts
+class AsyncBufferResponse : public AsyncProgmemResponse {
+private:
+  uint8_t *_buffer;
+public:
+  AsyncBufferResponse(int code, const String& contentType, uint8_t *content, size_t len)
+    : AsyncProgmemResponse(code, contentType.c_str(), content, len, nullptr), _buffer(content) {}
+  virtual ~AsyncBufferResponse() override {
+    if (_buffer) {
+      free(_buffer);
+      _buffer = nullptr;
+    }
+  }
+};
 
 AsyncWebServer server(80);
 uint8_t *captured_photo_buf = NULL;
@@ -862,16 +877,17 @@ void packTarTask(void *pvParameters) {
           size_t bytesRead = file.read(buf, toRead);
           if (bytesRead == 0) break;
           tarFile.write(buf, bytesRead);
-          size_t mod512 = bytesRead % 512;
-          if (mod512 != 0) {
-            size_t pad = 512 - mod512;
-            memset(buf, 0, pad);
-            tarFile.write(buf, pad);
-          }
           remaining -= bytesRead;
           vTaskDelay(pdMS_TO_TICKS(1)); // feed watchdog
         }
         file.close();
+
+        // TAR format requires padding to 512-byte block boundary at end of each file
+        size_t pad = (512 - (filesize % 512)) % 512;
+        if (pad > 0) {
+          memset(buf, 0, pad);
+          tarFile.write(buf, pad);
+        }
       }
     }
     nextPath = dir.getNextFileName(&isDir);
@@ -1248,7 +1264,12 @@ void setupWebServer() {
       return;
     }
     
-    size_t bufSize = 32768; // 32KB can hold ~1000 filenames
+    String filterSession = "";
+    if (request->hasArg("session")) {
+      filterSession = request->arg("session");
+    }
+    
+    size_t bufSize = 8192; // 8KB is safe and fits hundreds of session files
     char *outBuf = NULL;
     if (psramFound()) {
       outBuf = (char *)ps_malloc(bufSize);
@@ -1273,13 +1294,15 @@ void setupWebServer() {
         if (!isDir) {
           int lastSlash = filepath.lastIndexOf('/');
           if (lastSlash != -1) filepath = filepath.substring(lastSlash + 1);
-          if (len + filepath.length() + 5 >= bufSize) break;
-          if (!first) { outBuf[len++] = ','; }
-          outBuf[len++] = '"';
-          strcpy(outBuf + len, filepath.c_str());
-          len += filepath.length();
-          outBuf[len++] = '"';
-          first = false;
+          if (filterSession.length() == 0 || filepath.startsWith(filterSession)) {
+            if (len + filepath.length() + 5 >= bufSize) break;
+            if (!first) { outBuf[len++] = ','; }
+            outBuf[len++] = '"';
+            strcpy(outBuf + len, filepath.c_str());
+            len += filepath.length();
+            outBuf[len++] = '"';
+            first = false;
+          }
         }
         filepath = dir.getNextFileName(&isDir);
       }
@@ -1289,15 +1312,20 @@ void setupWebServer() {
     outBuf[len++] = ']';
     outBuf[len] = '\0';
     
-    String finalJson = String(outBuf);
-    free(outBuf);
-    request->send(200, "application/json", finalJson);
+    AsyncBufferResponse *response = new AsyncBufferResponse(200, "application/json", (uint8_t *)outBuf, len);
+    request->send(response);
   });
 
   server.on("/download_sd", HTTP_GET, [](AsyncWebServerRequest *request){
     if (!sdCardAvailable) { request->send(503, "text/plain", "SD Card not available"); return; }
     if (request->hasArg("file")) {
       String filename = "/lapse/" + request->arg("file");
+
+      if (sd_mutex && xSemaphoreTake(sd_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        request->send(503, "text/plain", "SD Card busy");
+        return;
+      }
+
       if (SD_MMC.exists(filename)) {
         String contentType = "image/jpeg";
         if (filename.endsWith(".tar")) contentType = "application/x-tar";
@@ -1312,34 +1340,37 @@ void setupWebServer() {
             if (file_buf) {
               size_t readBytes = file.read(file_buf, filesize);
               file.close();
+              if (sd_mutex) xSemaphoreGive(sd_mutex);
+
               if (readBytes == filesize) {
-                AsyncWebServerResponse *response = request->beginResponse(200, contentType, file_buf, filesize);
-                response->addHeader("Connection", "close");
+                // AsyncBufferResponse self-frees file_buf when request finishes, enabling HTTP Keep-Alive
+                AsyncBufferResponse *response = new AsyncBufferResponse(200, contentType, file_buf, filesize);
                 response->addHeader("Access-Control-Allow-Origin", "*");
-                request->onDisconnect([file_buf]() {
-                  if (file_buf) free(file_buf);
-                });
+                response->addHeader("Cache-Control", "public, max-age=31536000");
                 request->send(response);
-                Serial.printf("Served %s from PSRAM (%d bytes)\n", filename.c_str(), (int)filesize);
                 return;
               } else {
                 free(file_buf);
-                // Re-open if read failed to let fallback stream it
-                File fileRetry = SD_MMC.open(filename, FILE_READ);
-                if (fileRetry) file = fileRetry;
               }
+            } else {
+              file.close();
+              if (sd_mutex) xSemaphoreGive(sd_mutex);
             }
+          } else {
+            file.close();
+            if (sd_mutex) xSemaphoreGive(sd_mutex);
           }
-          file.close();
+        } else {
+          if (sd_mutex) xSemaphoreGive(sd_mutex);
         }
 
         // Fallback to streaming directly from SD Card if too large or PSRAM allocation failed
         AsyncWebServerResponse *response = request->beginResponse(SD_MMC, filename, contentType);
-        response->addHeader("Connection", "close");
         response->addHeader("Access-Control-Allow-Origin", "*");
         request->send(response);
         Serial.printf("Served %s streaming from SD Card\n", filename.c_str());
       } else {
+        if (sd_mutex) xSemaphoreGive(sd_mutex);
         request->send(404, "text/plain", "File not found");
       }
     } else {
@@ -1551,6 +1582,14 @@ void setupWebServer() {
 }
 
 void setupWiFi() {
+  // Pre-initialize Wi-Fi subsystem with reduced TX power BEFORE scanning/connecting.
+  // This caps peak RF current at ~220mA instead of the hardware default 20.5dBm (~450mA),
+  // preventing power rail brownout and sensor bus resets during Wi-Fi connection bursts.
+  WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_POWER_15dBm);
+  WiFi.setSleep(false);
+  delay(60);
+
   // Initialize WiFiManager
   // Creates an AP "PrusaLapse-Camera" if it can't connect to saved WiFi
   WiFiManager wm;
@@ -1564,8 +1603,7 @@ void setupWiFi() {
       Serial.println("");
       Serial.print("Camera IP: ");
       Serial.println(WiFi.localIP());
-      WiFi.setSleep(false); // Disable WiFi sleep to reduce latency and prevent disconnections
-      WiFi.setTxPower(WIFI_POWER_15dBm); // Reduce TX power to limit current draw and avoid power brownouts/stalls
+      WiFi.setTxPower(WIFI_POWER_15dBm); // Maintain 15dBm in connected state
       configTime(0, 0, "pool.ntp.org", "time.nist.gov"); // Sync UTC time via NTP for session timestamps
     }
   }
@@ -1574,15 +1612,61 @@ void setupWiFi() {
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Disable brownout detector
   Serial.begin(115200);
-  
-  // Setup GPIO Interrupt Trigger (Pin 12)
+
+  // =========================================================================
+  // STAGE 0: IMMEDIATE HARDWARE CLAMP & LOW-POWER DEFAULT STATE
+  // =========================================================================
+  // 1. Force High-Power Flash LED (GPIO 4) OFF immediately to eliminate floating gate leakage
+  pinMode(4, OUTPUT);
+  digitalWrite(4, LOW);
+
+  // 2. Force Camera Sensor into low-power shutdown (<10µA) via PWDN pin (GPIO 32)
+  pinMode(PWDN_GPIO_NUM, OUTPUT);
+  digitalWrite(PWDN_GPIO_NUM, HIGH);
+
+  // 3. Status LED (GPIO 33, active LOW) solid ON to indicate active boot sequence
+  pinMode(33, OUTPUT);
+  digitalWrite(33, LOW);
+
+  // 4. Setup GPIO Interrupt Trigger (Pin 12)
   esp_log_level_set("gpio", ESP_LOG_NONE);
   pinMode(12, INPUT_PULLDOWN);
   attachInterrupt(12, gpioTriggerISR, RISING);
-  
-  // Initialize SD Card
-  WiFi.mode(WIFI_STA); // Start WiFi subsystem to load NVS credentials
-  
+
+  // Allow board capacitors and power rail to stabilize after physical switch turn-on
+  delay(150);
+
+  // =========================================================================
+  // STAGE 1: MULTI-CAMERA STARTUP STAGGER
+  // =========================================================================
+  // When dual cameras are powered from the same 5V rail (e.g. printer USB / buck converter),
+  // staggering their initialization prevents combined inrush & Wi-Fi transmission spikes
+  // that cause brownouts and sensor lockups.
+  preferences.begin("prusalapse", true);
+  String camName = preferences.getString("cameraName", "");
+  preferences.end();
+
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+
+  int staggerMs = 0;
+  if (camName.indexOf("X-Axis") != -1 || camName.indexOf("1") != -1) {
+    staggerMs = 1200; // Secondary camera waits for Primary (Corner) to finish heavy startup
+  } else if (camName.indexOf("Corner") != -1 || camName.indexOf("0") != -1) {
+    staggerMs = 0;    // Primary camera boots immediately
+  } else {
+    // Unassigned boards stagger automatically based on unique MAC address parity
+    staggerMs = ((mac[5] ^ mac[4]) & 1) ? 1000 : 0;
+  }
+
+  if (staggerMs > 0) {
+    Serial.printf("Multi-board power stagger: holding low-power idle for %d ms...\n", staggerMs);
+    delay(staggerMs);
+  }
+
+  // =========================================================================
+  // STAGE 2: SD CARD INITIALIZATION & CONFIG SYNC
+  // =========================================================================
   if (SD_MMC.begin("/sdcard", true)) { // 1-bit mode
     sdCardAvailable = true;
     Serial.println("SD Card initialized.");
@@ -1597,28 +1681,32 @@ void setup() {
   camera_mutex = xSemaphoreCreateMutex();
   snapshot_mutex = xSemaphoreCreateMutex();
   sd_mutex = xSemaphoreCreateMutex();
-  
   sd_write_semaphore = xSemaphoreCreateBinary();
   xTaskCreatePinnedToCore(sdWriteTask, "sdWriteTask", 8192, NULL, 1, &sdWriteTaskHandle, 1);
-  
-  // Flash LED off
-  pinMode(4, OUTPUT);
-  digitalWrite(4, LOW);
-  
-  // Start continuous breathing heartbeat on Red Status LED (Pin 33)
-  xTaskCreate(heartbeatTask, "heartbeatTask", 2048, NULL, 1, &heartbeatTaskHandle);
-  
+
+  // Let 3.3V rail recover from SD card inrush before powering sensor
+  delay(120);
+
+  // =========================================================================
+  // STAGE 3: CAMERA SENSOR SOFT POWER-UP & INITIALIZATION
+  // =========================================================================
   setupCamera();
-  
+  delay(150); // Settle PSRAM buffers and sensor PLL clock
+
+  // =========================================================================
+  // STAGE 4: WI-FI INITIALIZATION WITH PRE-THROTTLED TX POWER
+  // =========================================================================
   setupWiFi();
 
   setupWebServer();
 
+  // Switch Red Status LED (Pin 33) to smooth continuous breathing heartbeat task
+  xTaskCreate(heartbeatTask, "heartbeatTask", 2048, NULL, 1, &heartbeatTaskHandle);
 
-  // Generate Prusa Connect fingerprint from MAC address if not loaded from NVS
+  // =========================================================================
+  // STAGE 5: PRUSA CONNECT & PRUSALINK BACKGROUND TASKS
+  // =========================================================================
   if (prusaConnectFingerprint.length() == 0) {
-    uint8_t mac[6];
-    WiFi.macAddress(mac);
     char fpBuf[64];
     snprintf(fpBuf, sizeof(fpBuf), "%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
       mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
@@ -1628,12 +1716,13 @@ void setup() {
   }
   Serial.printf("Prusa Connect Fingerprint: %s\n", prusaConnectFingerprint.c_str());
 
-  // Start Prusa Connect upload background task
+  // Start Prusa Connect upload background task (has internal 10s delay)
   xTaskCreatePinnedToCore(previewAndUploadTask, "previewAndUpload", 8192, NULL, 1, &previewTaskHandle, 0);
   Serial.println("Preview + Prusa Connect upload task started (runs on Core 0)");
 
-  // Start PrusaLink polling background task
+  // Start PrusaLink polling background task with 4-second initial grace period
   xTaskCreatePinnedToCore([](void *pvParameters) {
+    vTaskDelay(pdMS_TO_TICKS(4000)); // Grace period: let network, DHCP, and NTP settle
     static uint32_t pollInterval = 2000; 
 
     while (true) {

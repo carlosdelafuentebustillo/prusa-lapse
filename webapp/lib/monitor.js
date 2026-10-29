@@ -505,10 +505,15 @@ class MonitorService {
     this.log(`PC Backup Sync stopped. Synced ${this.frameCount} frames to local PC.`, 'info');
   }
 
-  async fetchOfflineSession(targetSessionIds = null, sessionTimestamp = null, jobName = null, jobId = null) {
+  async fetchOfflineSession(targetSessionIds = null, sessionTimestamp = null, jobName = null, jobId = null, remoteSessionId = null, remoteFrameCounts = null) {
     if (this.isCompiling) {
       this.log('Cannot fetch offline session while compiling.', 'error');
       throw new Error('Monitor is busy compiling');
+    }
+
+    if (this.fetchStatus && this.fetchStatus.isFetching) {
+      this.log(`Sync request rejected: Another session (${this.fetchStatus.remoteSessionId || this.fetchStatus.sessionId}) is currently syncing.`, 'warning');
+      throw new Error('Another session sync is already in progress. Please wait for it to complete.');
     }
     
     const config = await this.getConfig();
@@ -524,233 +529,294 @@ class MonitorService {
       timestamp = generateSessionTimestamp();
     }
     
-    const sessionId = `session_offline_${timestamp}`;
+    const sessionId = `session_${timestamp}`;
     const sessionDir = path.join(CAPTURES_DIR, sessionId);
     await fs.mkdir(sessionDir, { recursive: true });
-    
-    this.log(`Started fetching offline session: ${sessionId}`, 'info');
 
-    let totalFramesFetched = 0;
+    // Migrate any legacy session_offline_ directory into sessionDir
+    const legacyOfflineDir = path.join(CAPTURES_DIR, `session_offline_${timestamp}`);
+    try {
+      const lStat = await fs.stat(legacyOfflineDir);
+      if (lStat.isDirectory()) {
+        const lEntries = await fs.readdir(legacyOfflineDir, { withFileTypes: true });
+        for (const entry of lEntries) {
+          if (entry.isDirectory() && entry.name.startsWith('camera_')) {
+            const targetCamDir = path.join(sessionDir, entry.name);
+            await fs.mkdir(targetCamDir, { recursive: true });
+            const files = await fs.readdir(path.join(legacyOfflineDir, entry.name));
+            for (const f of files) {
+              try {
+                await fs.copyFile(path.join(legacyOfflineDir, entry.name, f), path.join(targetCamDir, f));
+              } catch {}
+            }
+          }
+        }
+        await fs.rm(legacyOfflineDir, { recursive: true, force: true });
+      }
+    } catch {}
+    
+    this.log(`Started fetching session: ${sessionId}`, 'info');
+
     let hasError = false;
     let errors = [];
 
-    for (let i = 0; i < config.cameraIps.length; i++) {
-      const ip = config.cameraIps[i];
-      const targetSessionId = targetSessionIds ? targetSessionIds[ip] : null;
-  
+    // Step 1: Resolve target frames per camera without overwhelming ESP32 with full SD file listings
+    const sessionInfo = await Promise.all(
+      config.cameraIps.map(async (ip, i) => {
+        const targetSessionId = targetSessionIds ? targetSessionIds[ip] : null;
         if (targetSessionIds && !targetSessionId) {
-          this.log(`Camera ${i} (${ip}) has no remote session ID for this timestamp. Skipping.`, 'info');
-          continue;
+          this.log(`Camera ${i} (${ip}) has no remote session ID for timestamp ${timestamp}. Skipping.`, 'info');
+          return { ip, index: i, skip: true, files: [], targetFiles: [] };
+        }
+
+        const expFrames = remoteFrameCounts ? remoteFrameCounts[ip] : null;
+        if (targetSessionId && typeof expFrames === 'number' && expFrames > 0) {
+          // Direct deterministic file generation from sessions.jsonl - NO /list_sd required!
+          const targetFiles = Array.from({ length: expFrames }, (_, idx) => `${targetSessionId}_f${String(idx).padStart(4, '0')}.jpg`);
+          return {
+            ip,
+            index: i,
+            effectiveSessionId: targetSessionId,
+            files: targetFiles,
+            targetFiles,
+            hasTar: false
+          };
         }
 
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 10000);
-          const listRes = await fetch(`http://${ip}/list_sd`, {
-            headers: { 'Connection': 'close' },
-            signal: controller.signal
-          });
+          const timeoutId = setTimeout(() => controller.abort(), 6000);
+          const listUrl = targetSessionId ? `http://${ip}/list_sd?session=${targetSessionId}` : `http://${ip}/list_sd`;
+          const listRes = await fetch(listUrl, { signal: controller.signal });
           clearTimeout(timeoutId);
-          
+
           if (!listRes.ok) {
-          this.log(`Camera ${i} (${ip}) failed to list SD card files: ${listRes.status}`, 'error');
-          hasError = true;
-          errors.push(`Camera ${i} failed to list files: ${listRes.status}`);
-          continue;
-        }
-        
-        const files = await listRes.json();
-        if (!files || files.length === 0) {
-          this.log(`Camera ${i} (${ip}) has no files on SD card.`, 'info');
-          continue;
-        }
-
-        const camDir = path.join(sessionDir, `camera_${i}`);
-        await fs.mkdir(camDir, { recursive: true });
-
-        // If no explicit targetSessionId was provided, find the latest sXXXX prefix on the SD card
-        // so multiple sessions on the SD card never overwrite each other's frame_XXXX.jpg files!
-        let effectiveSessionId = targetSessionId;
-        if (!effectiveSessionId) {
-          const prefixes = new Set();
-          for (const f of files) {
-            const base = f.split('/').pop();
-            const m = base.match(/^(s\d{4})_/);
-            if (m) prefixes.add(m[1]);
+            this.log(`Camera ${i} (${ip}) failed to list files: ${listRes.status}`, 'error');
+            return { ip, index: i, error: `HTTP ${listRes.status}`, files: [], targetFiles: [] };
           }
-          if (prefixes.size > 0) {
-            const sortedPrefixes = Array.from(prefixes).sort();
-            effectiveSessionId = sortedPrefixes[sortedPrefixes.length - 1];
-          }
-        }
 
-        // Fast path: Check if the TAR file exists!
-        if (effectiveSessionId && files.some(f => f.includes(`${effectiveSessionId}.tar`))) {
-          this.log(`Camera ${i} (${ip}) found pre-packed ${effectiveSessionId}.tar! Fast downloading...`, 'success');
-          try {
-            const tarRes = await fetch(`http://${ip}/download_sd?file=${effectiveSessionId}.tar`, {
-              headers: { 'Connection': 'close' }
-            });
-            if (tarRes.ok) {
-              this.fetchStatus = {
-                isFetching: true,
-                progress: 0,
-                currentCameraIndex: i,
-                totalCameras: config.cameraIps.length
-              };
-              
-              const tarPath = path.join(camDir, `${effectiveSessionId}.tar`);
-              const totalBytes = Number(tarRes.headers.get('content-length')) || 0;
-              let downloadedBytes = 0;
-              
-              const fileStream = createWriteStream(tarPath);
-              for await (const chunk of tarRes.body) {
-                fileStream.write(chunk);
-                downloadedBytes += chunk.length;
-                if (totalBytes > 0) {
-                  this.fetchStatus.progress = Math.round((downloadedBytes / totalBytes) * 100);
-                }
-              }
-              fileStream.end();
-              
-              // Extract tar
-              await tar.x({
-                file: tarPath,
-                cwd: camDir
-              });
-              
-              // Count extracted files and rename them
-              const extracted = await fs.readdir(camDir);
-              const jpgs = extracted.filter(f => f.endsWith('.jpg'));
-              
-              for (const jf of jpgs) {
-                 if (jf.startsWith('s') && jf.includes('_f')) {
-                   const parts = jf.split('_f');
-                   if (parts.length === 2) {
-                     const frameIndexStr = parts[1].replace('.jpg', '');
-                     const saveFilename = `frame_${frameIndexStr.padStart(4, '0')}.jpg`;
-                     await fs.rename(path.join(camDir, jf), path.join(camDir, saveFilename));
-                   }
-                 }
-              }
-              
-              await fs.rm(tarPath);
-              totalFramesFetched += jpgs.length;
-              this.log(`Camera ${i} (${ip}) extracted ${jpgs.length} frames from TAR successfully.`, 'success');
-              continue; // Skip the individual file fallback!
-            } else {
-              this.log(`Camera ${i} (${ip}) TAR download failed: ${tarRes.status}. Falling back to individual JPGs.`, 'warning');
+          const files = await listRes.json();
+          if (!files || files.length === 0) {
+            this.log(`Camera ${i} (${ip}) has no files on SD card.`, 'info');
+            return { ip, index: i, empty: true, files: [], targetFiles: [] };
+          }
+
+          let effectiveSessionId = targetSessionId;
+          if (!effectiveSessionId) {
+            const prefixes = new Set();
+            for (const f of files) {
+              const base = f.split('/').pop();
+              const m = base.match(/^(s\d{4})_/);
+              if (m) prefixes.add(m[1]);
             }
-          } catch(e) {
-            this.log(`Camera ${i} (${ip}) TAR extraction failed: ${e.message}. Falling back to individual JPGs.`, 'warning');
-          }
-        }
-
-        this.log(`Camera ${i} (${ip}) downloading individual files...`, 'info');
-
-        const targetFiles = files.filter(f => {
-          const file = f.split('/').pop();
-          if (file === 'sessions.jsonl' || file === 'config.txt' || file.endsWith('.tar') || file.endsWith('.tmp')) return false;
-          if (effectiveSessionId && !file.startsWith(effectiveSessionId + '_')) return false;
-          return true;
-        });
-        
-        const totalFiles = targetFiles.length;
-        let downloadedFiles = 0;
-        
-        this.fetchStatus = {
-          isFetching: true,
-          progress: 0,
-          currentCameraIndex: i,
-          totalCameras: config.cameraIps.length
-        };
-
-        for (const fileStr of files) {
-          const file = fileStr.split('/').pop(); // Ensure it's just the filename
-          if (file === 'sessions.jsonl' || file === 'config.txt' || file.endsWith('.tar') || file.endsWith('.tmp')) continue;
-          if (effectiveSessionId && !file.startsWith(effectiveSessionId + '_')) continue;
-          try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000);
-            
-            const dlRes = await fetch(`http://${ip}/download_sd?file=${file}`, {
-              headers: { 'Connection': 'close' },
-              signal: controller.signal
-            });
-            clearTimeout(timeoutId);
-            
-            if (dlRes.ok) {
-              const arrayBuffer = await dlRes.arrayBuffer();
-              const buffer = Buffer.from(arrayBuffer);
-              
-              let saveFilename = file;
-              if (file.startsWith('s') && file.includes('_f')) {
-                const parts = file.split('_f');
-                if (parts.length === 2) {
-                  const frameIndexStr = parts[1].replace('.jpg', '');
-                  saveFilename = `frame_${frameIndexStr.padStart(4, '0')}.jpg`;
-                }
-              }
-
-              const filePath = path.join(camDir, saveFilename);
-              await fs.writeFile(filePath, buffer);
-              totalFramesFetched++;
-              
-              downloadedFiles++;
-              if (totalFiles > 0) {
-                this.fetchStatus.progress = Math.round((downloadedFiles / totalFiles) * 100);
-              }
-            } else {
-              this.log(`Camera ${i} (${ip}) failed to download ${file}: ${dlRes.status}`, 'error');
-              hasError = true;
-              errors.push(`Camera ${i} download failed for ${file}`);
+            if (prefixes.size > 0) {
+              const sortedPrefixes = Array.from(prefixes).sort();
+              effectiveSessionId = sortedPrefixes[sortedPrefixes.length - 1];
             }
-          } catch(e) {
-             this.log(`Camera ${i} (${ip}) failed to download ${file}: ${e.message}`, 'error');
-             hasError = true;
-             errors.push(`Camera ${i} download failed for ${file}`);
           }
-        }
-        this.log(`Camera ${i} (${ip}) download complete.`, 'success');
 
-      } catch (err) {
-        this.log(`Camera ${i} (${ip}) unreachable for SD card fetch: ${err.message}`, 'error');
-        hasError = true;
-        errors.push(`Camera ${i} unreachable`);
+          const targetFiles = files.filter(f => {
+            const file = f.split('/').pop();
+            if (file === 'sessions.jsonl' || file === 'config.txt' || file.endsWith('.tar') || file.endsWith('.tmp')) return false;
+            if (effectiveSessionId && !file.startsWith(effectiveSessionId + '_')) return false;
+            return file.endsWith('.jpg');
+          });
+
+          return {
+            ip,
+            index: i,
+            effectiveSessionId,
+            files,
+            targetFiles,
+            hasTar: false
+          };
+        } catch (err) {
+          this.log(`Camera ${i} (${ip}) discovery failed: ${err.message}`, 'error');
+          return { ip, index: i, error: err.message, files: [], targetFiles: [] };
+        }
+      })
+    );
+
+    // Step 2: Calculate total expected frames across all cameras
+    const totalFramesExpected = sessionInfo.reduce((sum, cam) => sum + (cam.targetFiles ? cam.targetFiles.length : 0), 0);
+
+    // Step 3: Initialize global monotonic progress tracker
+    this.fetchStatus = {
+      isFetching: true,
+      sessionId,
+      remoteSessionId,
+      sessionTimestamp: timestamp,
+      overallProgress: 0,
+      progress: 0,
+      totalFramesExpected,
+      totalFramesFetched: 0,
+      currentCameraIndex: 0,
+      totalCameras: config.cameraIps.length,
+      cameras: sessionInfo.map(cam => ({
+        index: cam.index,
+        ip: cam.ip,
+        expected: cam.targetFiles ? cam.targetFiles.length : 0,
+        fetched: 0,
+        status: cam.error ? 'error' : (cam.skip ? 'skipped' : 'syncing')
+      }))
+    };
+
+    const recordFrameDownloaded = (camIndex) => {
+      if (this.fetchStatus) {
+        if (this.fetchStatus.cameras && this.fetchStatus.cameras[camIndex]) {
+          this.fetchStatus.cameras[camIndex].fetched++;
+        }
+        this.fetchStatus.totalFramesFetched++;
+        if (this.fetchStatus.totalFramesExpected > 0) {
+          const pct = Math.min(
+            100,
+            Math.round((this.fetchStatus.totalFramesFetched / this.fetchStatus.totalFramesExpected) * 100)
+          );
+          this.fetchStatus.overallProgress = pct;
+          this.fetchStatus.progress = pct;
+        }
       }
+    };
+
+    // Step 4: Download frames concurrently per camera
+    const downloadCameraFiles = async (camInfo) => {
+      if (camInfo.skip || camInfo.error || !camInfo.targetFiles || camInfo.targetFiles.length === 0) {
+        if (camInfo.error) {
+          hasError = true;
+          errors.push(`Camera ${camInfo.index} (${camInfo.ip}): ${camInfo.error}`);
+        }
+        return;
+      }
+
+      const { ip, index, targetFiles } = camInfo;
+      const camDir = path.join(sessionDir, `camera_${index}`);
+      await fs.mkdir(camDir, { recursive: true });
+
+      // Build list of target frames not yet on disk (allows seamless resumption)
+      const remainingFiles = [];
+      for (const fileStr of targetFiles) {
+        const file = fileStr.split('/').pop();
+        let saveFilename = file;
+        if (file.startsWith('s') && file.includes('_f')) {
+          const parts = file.split('_f');
+          if (parts.length === 2) {
+            const frameIndexStr = parts[1].replace('.jpg', '');
+            saveFilename = `frame_${frameIndexStr.padStart(4, '0')}.jpg`;
+          }
+        }
+
+        const localPath = path.join(camDir, saveFilename);
+        let alreadyOnDisk = false;
+        try {
+          const s = await fs.stat(localPath);
+          if (s.size > 500) {
+            alreadyOnDisk = true;
+            recordFrameDownloaded(index); // Count already existing frame towards progress
+          }
+        } catch {}
+
+        if (!alreadyOnDisk) {
+          remainingFiles.push({ remoteFile: file, saveFilename, localPath });
+        }
+      }
+
+      if (remainingFiles.length > 0) {
+        this.log(`Camera ${index} (${ip}) downloading ${remainingFiles.length} frames via HTTP Keep-Alive...`, 'info');
+        let cursor = 0;
+        let consecutiveFailures = 0;
+
+        while (cursor < remainingFiles.length) {
+          if (consecutiveFailures >= 3) {
+            this.log(`Camera ${index} (${ip}) disconnected (3 consecutive timeouts). Skipping remaining ${remainingFiles.length - cursor} frames.`, 'warning');
+            hasError = true;
+            errors.push(`Camera ${index} (${ip}) disconnected`);
+            if (this.fetchStatus && this.fetchStatus.cameras[index]) {
+              this.fetchStatus.cameras[index].status = 'error';
+            }
+            break;
+          }
+
+          const item = remainingFiles[cursor++];
+          let downloaded = false;
+
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 2500);
+              const dlRes = await fetch(`http://${ip}/download_sd?file=${item.remoteFile}`, {
+                signal: controller.signal
+              });
+              clearTimeout(timeout);
+
+              if (dlRes.ok) {
+                const arrayBuffer = await dlRes.arrayBuffer();
+                const buffer = Buffer.from(arrayBuffer);
+                if (buffer.length > 500) {
+                  await fs.writeFile(item.localPath, buffer);
+                  recordFrameDownloaded(index);
+                  downloaded = true;
+                  consecutiveFailures = 0;
+                  break;
+                }
+              }
+            } catch (e) {
+              if (attempt < 1) {
+                await new Promise(r => setTimeout(r, 100));
+              }
+            }
+          }
+
+          if (!downloaded) {
+            consecutiveFailures++;
+            this.log(`Camera ${index} (${ip}) failed to download ${item.remoteFile} (${consecutiveFailures}/3)`, 'error');
+            hasError = true;
+            errors.push(`Camera ${index} failed ${item.remoteFile}`);
+          }
+        }
+      }
+
+      if (this.fetchStatus && this.fetchStatus.cameras[index]) {
+        if (this.fetchStatus.cameras[index].status !== 'error') {
+          this.fetchStatus.cameras[index].status = 'done';
+        }
+      }
+      this.log(`Camera ${index} (${ip}) sync complete.`, 'success');
+    };
+
+    // Step 5: Execute cameras sequentially to prevent shared 5V power bus sags and Wi-Fi brownouts
+    for (const cam of sessionInfo) {
+      await downloadCameraFiles(cam);
     }
 
-    this.fetchStatus = null;
+    // Step 6: Count actual frames verified on disk
+    let totalFramesFetched = 0;
+    for (let i = 0; i < config.cameraIps.length; i++) {
+      try {
+        const cDir = path.join(sessionDir, `camera_${i}`);
+        const files = await fs.readdir(cDir);
+        totalFramesFetched += files.filter(f => f.startsWith('frame_') && f.endsWith('.jpg')).length;
+      } catch {}
+    }
 
     if (totalFramesFetched === 0) {
-      await fs.rm(sessionDir, { recursive: true, force: true });
+      this.fetchStatus = null;
       this.log('Offline fetch aborted. No files were downloaded.', 'warning');
       return { success: false, error: 'No files downloaded. ' + errors.join('. ') };
     }
-    
-    if (hasError) {
-      this.log(`Offline session fetch completed with errors. Downloaded ${totalFramesFetched} total frames.`, 'warning');
-      return { success: false, error: `Fetched ${totalFramesFetched} frames, but with errors: ` + errors.join('. '), sessionId };
+
+    if (this.fetchStatus) {
+      this.fetchStatus.overallProgress = 100;
+      this.fetchStatus.progress = 100;
+      this.fetchStatus.totalFramesFetched = totalFramesFetched;
     }
 
-    this.log(`Offline session fetch complete. Downloaded ${totalFramesFetched} total frames.`, 'success');
-    
-    // Rename the session directory to remove '_offline'
-    const newSessionId = sessionId.replace('_offline', '');
-    const newSessionDir = path.join(CAPTURES_DIR, newSessionId);
-    
     try {
-      await fs.rename(sessionDir, newSessionDir);
-      await this.syncJobMetadata(newSessionDir, jobId, jobName, timestamp);
-      this.remoteSessionsCache = this.remoteSessionsCache.filter(s => s.timestamp !== timestamp);
-      this.log(`Session is no longer considered offline. Renamed to ${newSessionId}.`, 'info');
-      return { success: true, sessionId: newSessionId };
-    } catch (renameErr) {
       await this.syncJobMetadata(sessionDir, jobId, jobName, timestamp);
-      this.remoteSessionsCache = this.remoteSessionsCache.filter(s => s.timestamp !== timestamp);
-      this.log(`Failed to rename session directory: ${renameErr.message}`, 'warning');
-      return { success: true, sessionId }; 
-    }
+    } catch {}
+    this.remoteSessionsCache = this.remoteSessionsCache.filter(s => s.timestamp !== timestamp);
+    this.log(`Session sync completed successfully (${totalFramesFetched} frames). Saved as ${sessionId}.`, 'success');
+    this.fetchStatus = null;
+    return { success: true, sessionId };
   }
 
   async wipeOfflineSD() {
@@ -851,6 +917,15 @@ class MonitorService {
             }
           }
           
+          if (isOffline) {
+            // Only skip if the session has literally 0 frames and is not currently fetching
+            const hasFrames = cameras.some(c => c.frameCount > 0);
+            const isCurrentlyFetchingThis = this.fetchStatus?.isFetching && this.fetchStatus?.sessionId === entry.name;
+            if (!isCurrentlyFetchingThis && !hasFrames && videos.length === 0) {
+              continue;
+            }
+          }
+
           sessions.push({
             id: entry.name,
             timestamp,
@@ -868,26 +943,34 @@ class MonitorService {
         this.remoteSessionsCache = [];
         const config = await this.getConfig();
         if (config && config.cameraIps) {
-          for (const ip of config.cameraIps) {
-            try {
-              const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 5000);
-              const res = await fetch(`http://${ip}/download_sd?file=sessions.jsonl`, {
-                headers: { 'Connection': 'close' },
-                signal: controller.signal
-              });
-              clearTimeout(timeoutId);
-              
-              if (res.ok) {
-                const text = await res.text();
-                const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-                for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-                  const line = lines[lineIdx];
-                  if (line) {
-                    try {
-                      const data = JSON.parse(line);
-                      let timestamp = data.timestamp;
-                      let targetDate = null;
+          const results = await Promise.all(
+            config.cameraIps.map(async (ip) => {
+              try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 2500);
+                const res = await fetch(`http://${ip}/download_sd?file=sessions.jsonl`, {
+                  signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+                if (res.ok) {
+                  return { ip, text: await res.text() };
+                }
+              } catch (e) {}
+              return { ip, text: null };
+            })
+          );
+
+          for (const item of results) {
+            const { ip, text } = item;
+            if (!text) continue;
+            const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+            for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+              const line = lines[lineIdx];
+              if (line) {
+                try {
+                  const data = JSON.parse(line);
+                  let timestamp = data.timestamp;
+                  let targetDate = null;
                       
                       if (timestamp && timestamp.length >= 15) {
                         try {
@@ -912,48 +995,93 @@ class MonitorService {
                         timestamp = generateSessionTimestamp(targetDate);
                       }
                       
-                      // Check if we already fetched this session locally
-                      const alreadyFetched = sessions.some(s => s.timestamp === timestamp && !s.isRemote);
+                      // Merge remote sessions across DIFFERENT cameras when they represent the same print
+                      const existingRemote = this.remoteSessionsCache.find(s => {
+                        if (s.remoteSessionIds && s.remoteSessionIds[ip]) return false; // Never merge two sessions from the same camera!
+                        if (data.job_id && s.jobId && data.job_id === s.jobId) return true;
+                        if (data.timestamp && s.hasExplicitTimestamp && Math.abs(s.originalDate - targetDate.getTime()) < 120000) return true;
+                        const existingSid = Object.values(s.remoteSessionIds || {})[0];
+                        if (!data.timestamp && !s.hasExplicitTimestamp && existingSid && existingSid === data.session) return true;
+                        return false;
+                      });
+                      const remoteMeta = data.job_name ? parsePrusaFilename(data.job_name) : null;
                       
-                      if (!alreadyFetched) {
-                        // Only merge remote sessions across DIFFERENT cameras when they represent the same print
-                        const existingRemote = this.remoteSessionsCache.find(s => {
-                          if (s.remoteSessionIds && s.remoteSessionIds[ip]) return false; // Never merge two sessions from the same camera!
-                          if (data.job_id && s.jobId && data.job_id === s.jobId) return true;
-                          if (data.timestamp && s.hasExplicitTimestamp && Math.abs(s.originalDate - targetDate.getTime()) < 120000) return true;
-                          const existingSid = Object.values(s.remoteSessionIds || {})[0];
-                          if (!data.timestamp && !s.hasExplicitTimestamp && existingSid && existingSid === data.session) return true;
-                          return false;
-                        });
-                        const remoteMeta = data.job_name ? parsePrusaFilename(data.job_name) : null;
-                        
-                        if (existingRemote) {
-                          existingRemote.cameras.push({ name: `camera_${existingRemote.cameras.length}`, frameCount: data.frames, ip: ip });
-                          existingRemote.remoteSessionIds[ip] = data.session;
-                          if (!existingRemote.meta && remoteMeta) existingRemote.meta = remoteMeta;
-                        } else {
-                          this.remoteSessionsCache.push({
-                            id: `remote_${timestamp}_${data.session || lineIdx}`,
-                            timestamp: timestamp,
-                            hasExplicitTimestamp: Boolean(data.timestamp && data.timestamp.length >= 15),
-                            originalDate: targetDate.getTime(),
-                            isOffline: true,
-                            isRemote: true,
-                            jobId: data.job_id || null,
-                            jobName: data.job_name || null,
-                            meta: remoteMeta,
-                            remoteSessionIds: { [ip]: data.session },
-                            cameras: [{ name: `camera_0`, frameCount: data.frames, ip: ip }],
-                            videos: []
-                          });
+                      if (existingRemote) {
+                        existingRemote.cameras.push({ name: `camera_${existingRemote.cameras.length}`, frameCount: data.frames, ip: ip });
+                        existingRemote.remoteSessionIds[ip] = data.session;
+                        if (!existingRemote.remoteFrameCounts) existingRemote.remoteFrameCounts = {};
+                        existingRemote.remoteFrameCounts[ip] = data.frames;
+                        if (!existingRemote.meta && remoteMeta) existingRemote.meta = remoteMeta;
+                        if (timestamp < existingRemote.timestamp) {
+                          existingRemote.timestamp = timestamp;
                         }
+                      } else {
+                        this.remoteSessionsCache.push({
+                          id: `remote_${timestamp}_${data.session || lineIdx}`,
+                          timestamp: timestamp,
+                          hasExplicitTimestamp: Boolean(data.timestamp && data.timestamp.length >= 15),
+                          originalDate: targetDate.getTime(),
+                          isOffline: true,
+                          isRemote: true,
+                          jobId: data.job_id || null,
+                          jobName: data.job_name || null,
+                          meta: remoteMeta,
+                          remoteSessionIds: { [ip]: data.session },
+                          remoteFrameCounts: { [ip]: data.frames },
+                          cameras: [{ name: `camera_0`, frameCount: data.frames, ip: ip }],
+                          videos: []
+                        });
                       }
                     } catch (e) {}
                   }
                 }
               }
-            } catch(e) {}
-          }
+
+          // Step B: Reconcile remote sessions with local sessions
+          this.remoteSessionsCache = this.remoteSessionsCache.filter(remote => {
+            const matchingLocal = sessions.find(local => {
+              if (local.isRemote) return false;
+              if (local.timestamp === remote.timestamp) return true;
+              if (remote.jobId && (local.jobId === remote.jobId || local.meta?.jobId === remote.jobId)) return true;
+              if (remote.hasExplicitTimestamp && local.timestamp) {
+                try {
+                  const parseTs = (ts) => new Date(
+                    parseInt(ts.slice(0, 4), 10), parseInt(ts.slice(4, 6), 10) - 1, parseInt(ts.slice(6, 8), 10),
+                    parseInt(ts.slice(9, 11), 10), parseInt(ts.slice(11, 13), 10), parseInt(ts.slice(13, 15), 10)
+                  ).getTime();
+                  if (Math.abs(parseTs(local.timestamp) - parseTs(remote.timestamp)) < 120000) return true;
+                } catch {}
+              }
+              return false;
+            });
+
+            if (matchingLocal) {
+              let allFramesDownloaded = true;
+              for (const [camIp, expFrames] of Object.entries(remote.remoteFrameCounts || {})) {
+                const camIdx = config.cameraIps.indexOf(camIp);
+                const lCam = matchingLocal.cameras.find(c => c.name === `camera_${camIdx}`);
+                const localCount = lCam ? lCam.frameCount : 0;
+                if (localCount < expFrames) {
+                  allFramesDownloaded = false;
+                  break;
+                }
+              }
+
+              if (allFramesDownloaded) {
+                matchingLocal.remoteSessionIds = remote.remoteSessionIds;
+                matchingLocal.remoteFrameCounts = remote.remoteFrameCounts;
+                matchingLocal.isSynced = true;
+                return false; // Fully fetched, hide duplicate remote card
+              } else {
+                matchingLocal.isIncomplete = true;
+                matchingLocal.remoteSessionIds = remote.remoteSessionIds;
+                matchingLocal.remoteFrameCounts = remote.remoteFrameCounts;
+                return false; // Reconciled into local session card with Resume Sync
+              }
+            }
+
+            return true; // Unsynced remote session
+          });
         }
       }
 
