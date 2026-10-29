@@ -314,13 +314,18 @@ void setupCamera();
 #define PCLK_GPIO_NUM     22
 
 // Self-freeing response for PSRAM buffers; frees memory immediately when response transmission finishes or aborts
+volatile uint32_t last_sd_download_time = 0;
+
 class AsyncBufferResponse : public AsyncProgmemResponse {
 private:
   uint8_t *_buffer;
 public:
   AsyncBufferResponse(int code, const String& contentType, uint8_t *content, size_t len)
-    : AsyncProgmemResponse(code, contentType.c_str(), content, len, nullptr), _buffer(content) {}
+    : AsyncProgmemResponse(code, contentType.c_str(), content, len, nullptr), _buffer(content) {
+    last_sd_download_time = millis();
+  }
   virtual ~AsyncBufferResponse() override {
+    last_sd_download_time = millis();
     if (_buffer) {
       free(_buffer);
       _buffer = nullptr;
@@ -526,8 +531,8 @@ void previewAndUploadTask(void *pvParameters) {
     uint32_t currentInterval = (currentPrinterState == "PRINTING") ? 30000 : 10000;
     vTaskDelay(pdMS_TO_TICKS(currentInterval));
 
-    if (capture_in_progress || sd_write_in_progress) {
-      continue; // Don't interfere with HQ timelapse captures or SD writes
+    if (capture_in_progress || sd_write_in_progress || (millis() - last_sd_download_time < 8000)) {
+      continue; // Don't interfere with HQ timelapse captures, SD writes, or active file downloads
     }
 
     // --- 1. Take a fresh VGA preview snapshot (keeps local webapp live & responsive) ---
@@ -1317,6 +1322,7 @@ void setupWebServer() {
   });
 
   server.on("/download_sd", HTTP_GET, [](AsyncWebServerRequest *request){
+    last_sd_download_time = millis();
     if (!sdCardAvailable) { request->send(503, "text/plain", "SD Card not available"); return; }
     if (request->hasArg("file")) {
       String filename = "/lapse/" + request->arg("file");
@@ -1603,7 +1609,7 @@ void setupWiFi() {
       Serial.println("");
       Serial.print("Camera IP: ");
       Serial.println(WiFi.localIP());
-      WiFi.setTxPower(WIFI_POWER_15dBm); // Maintain 15dBm in connected state
+      WiFi.setTxPower(WIFI_POWER_18_5dBm); // Maintain strong 18.5dBm in connected state
       configTime(0, 0, "pool.ntp.org", "time.nist.gov"); // Sync UTC time via NTP for session timestamps
     }
   }
@@ -1726,6 +1732,10 @@ void setup() {
     static uint32_t pollInterval = 2000; 
 
     while (true) {
+      if (millis() - last_sd_download_time < 5000) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        continue; // Pause PrusaLink polling while client is actively downloading SD timelapses
+      }
       if (WiFi.status() == WL_CONNECTED && prusaIp != "") {
         prusaIp.trim();
         prusaApiKey.trim();

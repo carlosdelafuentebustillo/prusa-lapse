@@ -726,8 +726,8 @@ class MonitorService {
         let consecutiveFailures = 0;
 
         while (cursor < remainingFiles.length) {
-          if (consecutiveFailures >= 3) {
-            this.log(`Camera ${index} (${ip}) disconnected (3 consecutive timeouts). Skipping remaining ${remainingFiles.length - cursor} frames.`, 'warning');
+          if (consecutiveFailures >= 4) {
+            this.log(`Camera ${index} (${ip}) disconnected (4 consecutive timeouts). Skipping remaining ${remainingFiles.length - cursor} frames.`, 'warning');
             hasError = true;
             errors.push(`Camera ${index} (${ip}) disconnected`);
             if (this.fetchStatus && this.fetchStatus.cameras[index]) {
@@ -739,17 +739,20 @@ class MonitorService {
           const item = remainingFiles[cursor++];
           let downloaded = false;
 
-          for (let attempt = 0; attempt < 2; attempt++) {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            let timeoutId = null;
             try {
               const controller = new AbortController();
-              const timeout = setTimeout(() => controller.abort(), 2500);
+              // Generous 35s timeout to safely accommodate ~100KB frames over congested Wi-Fi
+              timeoutId = setTimeout(() => controller.abort(), 35000);
               const dlRes = await fetch(`http://${ip}/download_sd?file=${item.remoteFile}`, {
                 signal: controller.signal
               });
-              clearTimeout(timeout);
 
               if (dlRes.ok) {
                 const arrayBuffer = await dlRes.arrayBuffer();
+                clearTimeout(timeoutId);
+                timeoutId = null;
                 const buffer = Buffer.from(arrayBuffer);
                 if (buffer.length > 500) {
                   await fs.writeFile(item.localPath, buffer);
@@ -758,17 +761,24 @@ class MonitorService {
                   consecutiveFailures = 0;
                   break;
                 }
+              } else {
+                clearTimeout(timeoutId);
+                timeoutId = null;
               }
             } catch (e) {
-              if (attempt < 1) {
-                await new Promise(r => setTimeout(r, 100));
+              if (timeoutId) {
+                clearTimeout(timeoutId);
+                timeoutId = null;
+              }
+              if (attempt < 2) {
+                await new Promise(r => setTimeout(r, 1000));
               }
             }
           }
 
           if (!downloaded) {
             consecutiveFailures++;
-            this.log(`Camera ${index} (${ip}) failed to download ${item.remoteFile} (${consecutiveFailures}/3)`, 'error');
+            this.log(`Camera ${index} (${ip}) failed to download ${item.remoteFile} (${consecutiveFailures}/4)`, 'error');
             hasError = true;
             errors.push(`Camera ${index} failed ${item.remoteFile}`);
           }
