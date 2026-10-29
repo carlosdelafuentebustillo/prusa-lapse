@@ -319,6 +319,11 @@ export default function Home() {
           }
           if (data.fetchStatus !== undefined) {
             setFetchStatus(data.fetchStatus);
+            if (data.fetchStatus?.isFetching && data.fetchStatus.remoteSessionId) {
+              setFetchingSessionId(data.fetchStatus.remoteSessionId);
+            } else if (!data.fetchStatus?.isFetching && fetchingSessionId) {
+              setFetchingSessionId(null);
+            }
           }
         })
         .catch(() => {});
@@ -330,7 +335,27 @@ export default function Home() {
       clearInterval(monitorInterval);
       clearInterval(sessionInterval);
     };
-  }, []);
+  }, [fetchingSessionId]);
+
+  useEffect(() => {
+    if (!fetchingSessionId && !fetchStatus?.isFetching) return;
+    const fastSyncPoll = setInterval(() => {
+      fetch('/api/monitor')
+        .then(res => res.json())
+        .then(data => {
+          if (data.fetchStatus !== undefined) {
+            setFetchStatus(data.fetchStatus);
+            if (data.fetchStatus?.isFetching && data.fetchStatus.remoteSessionId) {
+              setFetchingSessionId(data.fetchStatus.remoteSessionId);
+            } else if (!data.fetchStatus?.isFetching) {
+              setFetchingSessionId(null);
+            }
+          }
+        })
+        .catch(() => {});
+    }, 400);
+    return () => clearInterval(fastSyncPoll);
+  }, [fetchingSessionId, fetchStatus?.isFetching]);
 
   useEffect(() => {
     if (logBoxRef.current) {
@@ -599,7 +624,9 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          remoteSessionId: session.id,
           targetSessionIds: session.remoteSessionIds,
+          remoteFrameCounts: session.remoteFrameCounts || (session.cameras ? Object.fromEntries(session.cameras.filter(c => c.ip).map(c => [c.ip, c.frameCount])) : null),
           sessionTimestamp: session.timestamp,
           jobName: session.jobName || session.meta?.displayName || null,
           jobId: session.jobId || session.meta?.jobId || null
@@ -756,6 +783,16 @@ export default function Home() {
                       On Camera SD
                     </span>
                   )}
+                  {session.isIncomplete && (
+                    <span style={{ fontSize: '0.68rem', background: 'rgba(255,170,0,0.15)', color: '#ffaa00', border: '1px solid rgba(255,170,0,0.3)', padding: '1px 8px', borderRadius: '10px', fontWeight: 600 }}>
+                      Incomplete Sync
+                    </span>
+                  )}
+                  {session.isSynced && (
+                    <span style={{ fontSize: '0.68rem', background: 'rgba(46,204,113,0.15)', color: '#2ecc71', border: '1px solid rgba(46,204,113,0.3)', padding: '1px 8px', borderRadius: '10px', fontWeight: 600 }}>
+                      ✓ Synced
+                    </span>
+                  )}
                 </div>
               )}
 
@@ -781,29 +818,94 @@ export default function Home() {
         {/* Camera Actions */}
         {session.isRemote ? (
           <div>
-            <button
-              className="btn btn-primary btn-small"
-              onClick={() => handleFetchOffline(session)}
-              style={{ width: '100%', position: 'relative', overflow: 'hidden', padding: '9px' }}
-              disabled={isMonitoring || fetchingSessionId !== null}
-            >
-              {fetchingSessionId === session.id && fetchStatus && fetchStatus.isFetching && (
-                <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', backgroundColor: 'rgba(0,0,0,0.25)', width: `${fetchStatus.progress}%`, transition: 'width 0.3s ease' }} />
-              )}
-              <span style={{ position: 'relative', zIndex: 1, display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
-                {fetchingSessionId === session.id ? (
-                  <>
-                    <span className="spinner" style={{ width: '14px', height: '14px' }} />
-                    {fetchStatus && fetchStatus.isFetching ? `Syncing Camera ${fetchStatus.currentCameraIndex + 1}/${fetchStatus.totalCameras} (${fetchStatus.progress}%)` : 'Syncing from SD...'}
-                  </>
-                ) : (
-                  'Sync Session from Camera SD'
-                )}
-              </span>
-            </button>
+            {(() => {
+              const isCurrentFetching = (fetchingSessionId === session.id) || (fetchStatus?.isFetching && fetchStatus?.remoteSessionId === session.id);
+              return (
+                <>
+                  <button
+                    className="btn btn-primary btn-small"
+                    onClick={() => handleFetchOffline(session)}
+                    style={{ width: '100%', position: 'relative', overflow: 'hidden', padding: '9px' }}
+                    disabled={isMonitoring || (fetchStatus?.isFetching && !isCurrentFetching) || (fetchingSessionId !== null && !isCurrentFetching)}
+                  >
+                    {isCurrentFetching && fetchStatus && fetchStatus.isFetching && (
+                      <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', backgroundColor: 'rgba(0,0,0,0.28)', width: `${fetchStatus.overallProgress ?? fetchStatus.progress ?? 0}%`, transition: 'width 0.25s ease' }} />
+                    )}
+                    <span style={{ position: 'relative', zIndex: 1, display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                      {isCurrentFetching ? (
+                        <>
+                          <span className="spinner" style={{ width: '14px', height: '14px' }} />
+                          {fetchStatus && fetchStatus.isFetching ? (
+                            fetchStatus.totalFramesExpected > 0 ? (
+                              `Syncing: ${fetchStatus.totalFramesFetched || 0}/${fetchStatus.totalFramesExpected} frames (${fetchStatus.overallProgress ?? fetchStatus.progress ?? 0}%)`
+                            ) : (
+                              `Syncing frames... (${fetchStatus.overallProgress ?? fetchStatus.progress ?? 0}%)`
+                            )
+                          ) : 'Connecting to cameras...'}
+                        </>
+                      ) : (
+                        'Sync Session from Camera SD'
+                      )}
+                    </span>
+                  </button>
+                  {isCurrentFetching && fetchStatus?.cameras && fetchStatus.cameras.length > 1 && (
+                    <div style={{ display: 'flex', gap: '12px', justifyContent: 'center', marginTop: '6px', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                      {fetchStatus.cameras.map((c, idx) => (
+                        <span key={idx} style={{ opacity: c.status === 'done' ? 0.8 : 1, color: c.status === 'error' ? '#ff6b6b' : 'inherit' }}>
+                          {getCameraDisplayName(idx)}: {c.fetched}/{c.expected} {c.status === 'done' ? '✓' : (c.status === 'error' ? '⚠ offline' : '')}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
           </div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '10px' }}>
+          <div>
+            {session.isIncomplete && (
+              <div style={{ marginBottom: '10px' }}>
+                {(() => {
+                  const isCurrentFetching = (fetchingSessionId === session.id) || (fetchStatus?.isFetching && (fetchStatus?.remoteSessionId === session.id || fetchStatus?.sessionId === session.id));
+                  return (
+                    <>
+                      <button
+                        className="btn btn-primary btn-small"
+                        onClick={() => handleFetchOffline(session)}
+                        style={{ width: '100%', position: 'relative', overflow: 'hidden', padding: '8px', background: 'linear-gradient(135deg, #e67e22, #d35400)' }}
+                        disabled={isMonitoring || (fetchStatus?.isFetching && !isCurrentFetching) || (fetchingSessionId !== null && !isCurrentFetching)}
+                      >
+                        {isCurrentFetching && fetchStatus && fetchStatus.isFetching && (
+                          <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', backgroundColor: 'rgba(0,0,0,0.28)', width: `${fetchStatus.overallProgress ?? fetchStatus.progress ?? 0}%`, transition: 'width 0.25s ease' }} />
+                        )}
+                        <span style={{ position: 'relative', zIndex: 1, display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                          {isCurrentFetching ? (
+                            <>
+                              <span className="spinner" style={{ width: '14px', height: '14px' }} />
+                              {fetchStatus && fetchStatus.isFetching ? (
+                                `Syncing missing frames: ${fetchStatus.totalFramesFetched || 0}/${fetchStatus.totalFramesExpected} (${fetchStatus.overallProgress ?? fetchStatus.progress ?? 0}%)`
+                              ) : 'Connecting...'}
+                            </>
+                          ) : (
+                            'Resume Sync Missing Frames from SD'
+                          )}
+                        </span>
+                      </button>
+                      {isCurrentFetching && fetchStatus?.cameras && fetchStatus.cameras.length > 1 && (
+                        <div style={{ display: 'flex', gap: '12px', justifyContent: 'center', marginTop: '6px', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                          {fetchStatus.cameras.map((c, idx) => (
+                            <span key={idx} style={{ opacity: c.status === 'done' ? 0.8 : 1, color: c.status === 'error' ? '#ff6b6b' : 'inherit' }}>
+                              {getCameraDisplayName(idx)}: {c.fetched}/{c.expected} {c.status === 'done' ? '✓' : (c.status === 'error' ? '⚠ offline' : '')}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+            )}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '10px' }}>
             {session.cameras.map((cam, idx) => {
               const hasVideo = session.videos.includes(`camera_${idx}.mp4`);
               const isThisCompiling = compilingStatus?.sessionId === session.id && compilingStatus?.cameraIndex === idx;
@@ -873,6 +975,7 @@ export default function Home() {
                 </div>
               );
             })}
+            </div>
           </div>
         )}
       </div>

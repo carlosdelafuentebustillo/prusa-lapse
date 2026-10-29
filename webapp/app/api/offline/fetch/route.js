@@ -7,16 +7,20 @@ export async function POST(request) {
     let sessionTimestamp = null;
     let jobName = null;
     let jobId = null;
+    let remoteSessionId = null;
+    let remoteFrameCounts = null;
     try {
       const body = await request.json();
       targetSessionIds = body.targetSessionIds || null;
       sessionTimestamp = body.sessionTimestamp || null;
       jobName = body.jobName || null;
       jobId = body.jobId || null;
+      remoteSessionId = body.remoteSessionId || null;
+      remoteFrameCounts = body.remoteFrameCounts || null;
     } catch (e) {
       // Ignore JSON parse errors if body is empty
     }
-    const result = await monitor.fetchOfflineSession(targetSessionIds, sessionTimestamp, jobName, jobId);
+    const result = await monitor.fetchOfflineSession(targetSessionIds, sessionTimestamp, jobName, jobId, remoteSessionId, remoteFrameCounts);
     if (!result.success) {
       return NextResponse.json({ success: false, error: result.error, sessionId: result.sessionId }, { status: 400 });
     }
