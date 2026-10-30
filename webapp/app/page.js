@@ -302,7 +302,34 @@ export default function Home() {
     fetch(`/api/sessions${forceRemote === true ? '?remote=true' : ''}`)
       .then(res => res.json())
       .then(data => {
-        if (data.sessions) setSessions(data.sessions);
+        if (data.sessions) {
+          // Client-side deduplication safeguard: if a local session exists for a print, never render a duplicate remote card
+          const localKeys = new Set();
+          data.sessions.forEach(s => {
+            if (!s.isRemote) {
+              if (s.timestamp) localKeys.add(s.timestamp);
+              if (s.meta?.displayName) localKeys.add(s.meta.displayName);
+              if (s.meta?.modelName) localKeys.add(s.meta.modelName);
+              if (s.jobName) localKeys.add(s.jobName);
+              if (s.remoteSessionIds) Object.values(s.remoteSessionIds).forEach(id => localKeys.add(id));
+            }
+          });
+
+          const deduped = data.sessions.filter(s => {
+            if (!s.isRemote) return true;
+            if (fetchStatus?.isFetching && (fetchStatus.remoteSessionId === s.id || fetchStatus.sessionTimestamp === s.timestamp)) {
+              return false;
+            }
+            if (s.timestamp && localKeys.has(s.timestamp)) return false;
+            if (s.jobName && localKeys.has(s.jobName)) return false;
+            if (s.meta?.displayName && localKeys.has(s.meta.displayName)) return false;
+            if (s.meta?.modelName && localKeys.has(s.meta.modelName)) return false;
+            if (s.remoteSessionIds && Object.values(s.remoteSessionIds).some(id => localKeys.has(id))) return false;
+            return true;
+          });
+
+          setSessions(deduped);
+        }
       });
   };
 
