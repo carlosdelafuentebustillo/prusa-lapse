@@ -1098,6 +1098,41 @@ class MonitorService {
       // Add cached remote sessions to the local sessions
       sessions.push(...this.remoteSessionsCache);
 
+      // Normalize sync metrics across all sessions
+      for (const s of sessions) {
+        if (s.isRemote) {
+          s.totalFramesLocal = 0;
+          let expected = 0;
+          if (s.remoteFrameCounts) {
+            expected = Object.values(s.remoteFrameCounts).reduce((a, b) => a + (Number(b) || 0), 0);
+          } else if (s.cameras) {
+            expected = s.cameras.reduce((sum, c) => sum + (c.frameCount || 0), 0);
+          }
+          s.totalFramesExpected = expected;
+          s.syncPercentage = 0;
+          s.syncState = 'remote';
+        } else {
+          const localFrames = (s.cameras || []).reduce((sum, c) => sum + (c.frameCount || 0), 0);
+          s.totalFramesLocal = localFrames;
+          let expected = localFrames;
+          if (s.remoteFrameCounts) {
+            const expSum = Object.values(s.remoteFrameCounts).reduce((a, b) => a + (Number(b) || 0), 0);
+            if (expSum > 0) expected = Math.max(localFrames, expSum);
+          }
+          s.totalFramesExpected = expected;
+          if (s.isSynced) {
+            s.syncPercentage = 100;
+            s.syncState = 'synced';
+          } else if (s.isIncomplete || expected > localFrames) {
+            s.syncPercentage = expected > 0 ? Math.min(99, Math.round((localFrames / expected) * 100)) : 100;
+            s.syncState = 'partial';
+          } else {
+            s.syncPercentage = 100;
+            s.syncState = 'synced';
+          }
+        }
+      }
+
       return sessions.sort((a, b) => b.id.localeCompare(a.id));
     } catch (e) {
       return [];
