@@ -1046,53 +1046,81 @@ class MonitorService {
                   }
                 }
               }
+            }
+          }
 
-          // Step B: Reconcile remote sessions with local sessions
-          this.remoteSessionsCache = this.remoteSessionsCache.filter(remote => {
-            const matchingLocal = sessions.find(local => {
-              if (local.isRemote) return false;
-              if (local.timestamp === remote.timestamp) return true;
-              if (remote.jobId && (local.jobId === remote.jobId || local.meta?.jobId === remote.jobId)) return true;
-              if (remote.hasExplicitTimestamp && local.timestamp) {
-                try {
-                  const parseTs = (ts) => new Date(
-                    parseInt(ts.slice(0, 4), 10), parseInt(ts.slice(4, 6), 10) - 1, parseInt(ts.slice(6, 8), 10),
-                    parseInt(ts.slice(9, 11), 10), parseInt(ts.slice(11, 13), 10), parseInt(ts.slice(13, 15), 10)
-                  ).getTime();
-                  if (Math.abs(parseTs(local.timestamp) - parseTs(remote.timestamp)) < 120000) return true;
-                } catch {}
-              }
-              return false;
-            });
+      // Step B: Reconcile remote sessions with local sessions (runs on EVERY call, even without includeRemote)
+      if (this.remoteSessionsCache && this.remoteSessionsCache.length > 0) {
+        const config = await this.getConfig();
+        const cameraIps = config?.cameraIps || [];
 
-            if (matchingLocal) {
-              let allFramesDownloaded = true;
-              for (const [camIp, expFrames] of Object.entries(remote.remoteFrameCounts || {})) {
-                const camIdx = config.cameraIps.indexOf(camIp);
-                const lCam = matchingLocal.cameras.find(c => c.name === `camera_${camIdx}`);
-                const localCount = lCam ? lCam.frameCount : 0;
-                if (localCount < expFrames) {
-                  allFramesDownloaded = false;
-                  break;
-                }
-              }
+        this.remoteSessionsCache = this.remoteSessionsCache.filter(remote => {
+          const matchingLocal = sessions.find(local => {
+            if (local.isRemote) return false;
+            if (local.timestamp && remote.timestamp && local.timestamp === remote.timestamp) return true;
+            if (remote.jobId && (local.jobId === remote.jobId || local.meta?.jobId === remote.jobId)) return true;
 
-              if (allFramesDownloaded) {
-                matchingLocal.remoteSessionIds = remote.remoteSessionIds;
-                matchingLocal.remoteFrameCounts = remote.remoteFrameCounts;
-                matchingLocal.isSynced = true;
-                return false; // Fully fetched, hide duplicate remote card
-              } else {
-                matchingLocal.isIncomplete = true;
-                matchingLocal.remoteSessionIds = remote.remoteSessionIds;
-                matchingLocal.remoteFrameCounts = remote.remoteFrameCounts;
-                return false; // Reconciled into local session card with Resume Sync
+            // Match by active sync status
+            if (this.fetchStatus?.isFetching && (
+              (this.fetchStatus.remoteSessionId === remote.id && this.fetchStatus.sessionId === local.id) ||
+              (this.fetchStatus.sessionTimestamp === remote.timestamp && this.fetchStatus.sessionId === local.id)
+            )) return true;
+
+            // Match by remote session IDs (e.g. s0006)
+            if (local.remoteSessionIds && remote.remoteSessionIds) {
+              const localIds = Object.values(local.remoteSessionIds);
+              const remoteIds = Object.values(remote.remoteSessionIds);
+              if (localIds.some(id => remoteIds.includes(id))) return true;
+            }
+
+            // Match by filename / job name
+            const localName = local.meta?.displayName || local.jobName || local.meta?.modelName;
+            const remoteName = remote.jobName || remote.meta?.displayName || remote.meta?.modelName;
+            if (localName && remoteName && (localName === remoteName || (local.meta?.modelName && local.meta.modelName === remote.meta?.modelName))) {
+              return true;
+            }
+
+            if (remote.hasExplicitTimestamp && local.timestamp) {
+              try {
+                const parseTs = (ts) => new Date(
+                  parseInt(ts.slice(0, 4), 10), parseInt(ts.slice(4, 6), 10) - 1, parseInt(ts.slice(6, 8), 10),
+                  parseInt(ts.slice(9, 11), 10), parseInt(ts.slice(11, 13), 10), parseInt(ts.slice(13, 15), 10)
+                ).getTime();
+                if (Math.abs(parseTs(local.timestamp) - parseTs(remote.timestamp)) < 120000) return true;
+              } catch {}
+            }
+            return false;
+          });
+
+          if (matchingLocal) {
+            let allFramesDownloaded = true;
+            for (const [camIp, expFrames] of Object.entries(remote.remoteFrameCounts || {})) {
+              const camIdx = cameraIps.indexOf(camIp);
+              const lCam = matchingLocal.cameras.find(c => c.name === `camera_${camIdx}`);
+              const localCount = lCam ? lCam.frameCount : 0;
+              if (localCount < expFrames) {
+                allFramesDownloaded = false;
+                break;
               }
             }
 
-            return true; // Unsynced remote session
-          });
-        }
+            matchingLocal.remoteSessionIds = remote.remoteSessionIds;
+            matchingLocal.remoteFrameCounts = remote.remoteFrameCounts;
+            if (allFramesDownloaded) {
+              matchingLocal.isSynced = true;
+            } else {
+              matchingLocal.isIncomplete = true;
+            }
+            return false; // Reconciled into local session card, remove duplicate remote card!
+          }
+
+          // If this remote session is currently being fetched, don't show separate remote card
+          if (this.fetchStatus?.isFetching && this.fetchStatus.remoteSessionId === remote.id) {
+            return false;
+          }
+
+          return true; // Genuine unsynced remote session
+        });
       }
 
       // Add cached remote sessions to the local sessions
