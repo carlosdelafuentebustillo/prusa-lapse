@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import http from 'http';
 
 function findLatestFirmware() {
   const candidatePaths = [
@@ -113,7 +114,8 @@ export async function POST(request) {
     }
 
     // Node.js fetch with FormData uses Transfer-Encoding: chunked, which crashes ESPAsyncWebServer.
-    // We must manually assemble the multipart payload into a single Buffer to calculate the Content-Length.
+    // We assemble the multipart payload with exact Content-Length and stream it in paced 4KB chunks
+    // respecting TCP backpressure ('drain') to avoid overwhelming the ESP32's 2.8KB window and power rail.
     const boundary = '----WebKitFormBoundaryOTAUpdate' + Date.now().toString(16);
     const crlf = '\r\n';
     
@@ -123,29 +125,64 @@ export async function POST(request) {
       `Content-Type: application/octet-stream${crlf}${crlf}`
     );
     const footer = Buffer.from(`${crlf}--${boundary}--${crlf}`);
-    
-    const bodyBuffer = Buffer.concat([header, fileBuffer, footer]);
+    const totalLength = header.length + fileBuffer.length + footer.length;
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout for OTA flash
+    const updateResult = await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: ip,
+        port: 80,
+        path: '/update',
+        method: 'POST',
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': totalLength.toString(),
+          'Connection': 'close'
+        },
+        timeout: 90000
+      }, (res) => {
+        let resBody = '';
+        res.on('data', chunk => resBody += chunk);
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve({ ok: true, status: res.statusCode, text: resBody.trim() });
+          } else {
+            resolve({ ok: false, status: res.statusCode, text: resBody.trim() });
+          }
+        });
+      });
 
-    const response = await fetch(`http://${ip}/update`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
-        'Content-Length': bodyBuffer.length.toString()
-      },
-      body: bodyBuffer,
-      signal: controller.signal
+      req.on('error', (err) => reject(err));
+      req.on('timeout', () => { req.destroy(); reject(new Error('OTA flash upload timed out after 90 seconds')); });
+
+      // Write header
+      req.write(header);
+
+      // Paced writing of binary payload in 4KB chunks with small yield
+      const chunkSize = 4096;
+      let offset = 0;
+      function sendNextChunk() {
+        while (offset < fileBuffer.length) {
+          const end = Math.min(offset + chunkSize, fileBuffer.length);
+          const chunk = fileBuffer.subarray(offset, end);
+          offset = end;
+
+          const canContinue = req.write(chunk);
+          if (!canContinue) {
+            req.once('drain', () => setTimeout(sendNextChunk, 8)); // 8ms pause to let SPI flash write settle
+            return;
+          }
+        }
+        // Write footer and end
+        req.end(footer);
+      }
+
+      sendNextChunk();
     });
-    clearTimeout(timeoutId);
 
-    const text = await response.text();
-    
-    if (response.ok) {
-      return NextResponse.json({ success: true, message: text });
+    if (updateResult.ok && updateResult.text !== 'FAIL') {
+      return NextResponse.json({ success: true, message: updateResult.text || 'OK' });
     } else {
-      return NextResponse.json({ error: text || `Camera update returned HTTP ${response.status}` }, { status: response.status });
+      return NextResponse.json({ error: updateResult.text || `Camera update returned HTTP ${updateResult.status}` }, { status: 400 });
     }
   } catch (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
