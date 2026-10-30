@@ -118,11 +118,25 @@ class MonitorService {
       const metaPath = path.join(sessionDir, 'meta.json');
       const thumbPath = path.join(sessionDir, 'thumbnail.png');
 
+      const sessionBase = path.basename(sessionDir);
+      if (!expectedJobId && this.fetchStatus?.isFetching && this.fetchStatus.sessionId === sessionBase) {
+        expectedJobId = this.fetchStatus.jobId || null;
+      }
+      if (!fallbackJobName && this.fetchStatus?.isFetching && this.fetchStatus.sessionId === sessionBase) {
+        fallbackJobName = this.fetchStatus.jobName || null;
+      }
+
       let existingMeta = null;
       if (existsSync(metaPath)) {
         try {
           existingMeta = JSON.parse(await fs.readFile(metaPath, 'utf-8'));
-          if (existingMeta && existingMeta.modelName && existsSync(thumbPath)) return existingMeta;
+          if (existingMeta && existingMeta.modelName && existsSync(thumbPath)) {
+            const nameMatches = !fallbackJobName || existingMeta.displayName === fallbackJobName || existingMeta.modelName === fallbackJobName;
+            const idMatches = !expectedJobId || existingMeta.jobId === expectedJobId;
+            if (nameMatches && idMatches) {
+              return existingMeta;
+            }
+          }
         } catch (e) {}
       }
 
@@ -182,8 +196,8 @@ class MonitorService {
               );
             }
 
-            if (!matchedFile && printFiles.length > 0) {
-              // Match by closest m_timestamp before or near sessionTimestamp, or latest print file
+            // Only attempt timestamp heuristic if we DO NOT already have a displayName or expectedJobId
+            if (!matchedFile && !displayName && !expectedJobId && printFiles.length > 0) {
               let sessionEpochSec = 0;
               if (sessionTimestamp && sessionTimestamp.length >= 15) {
                 const y = parseInt(sessionTimestamp.substring(0, 4), 10);
@@ -197,10 +211,8 @@ class MonitorService {
 
               const sorted = [...printFiles].sort((a, b) => (b.m_timestamp || 0) - (a.m_timestamp || 0));
               if (sessionEpochSec > 0) {
-                // Find the most recent file uploaded before session start (with 18h tolerance for timezone/printing duration)
-                matchedFile = sorted.find(f => (f.m_timestamp || 0) <= sessionEpochSec + 64800) || sorted[0];
-              } else {
-                matchedFile = sorted[0];
+                // Must be within 6 hours of session start
+                matchedFile = sorted.find(f => Math.abs((f.m_timestamp || 0) - sessionEpochSec) <= 21600);
               }
             }
 
@@ -223,8 +235,9 @@ class MonitorService {
         parsed.modelName = existingMeta.customName;
       }
 
-      let hasThumbnail = existsSync(thumbPath);
-      if (thumbRef && !hasThumbnail && config && config.prusaIp) {
+      const isMismatchedThumb = existingMeta?.modelName && parsed.modelName && existingMeta.modelName !== parsed.modelName;
+      let hasThumbnail = existsSync(thumbPath) && !isMismatchedThumb;
+      if (thumbRef && (!hasThumbnail || isMismatchedThumb) && config && config.prusaIp) {
         try {
           const thumbCtrl = new AbortController();
           const thumbTimeout = setTimeout(() => thumbCtrl.abort(), 5000);
@@ -533,6 +546,13 @@ class MonitorService {
     const sessionDir = path.join(CAPTURES_DIR, sessionId);
     await fs.mkdir(sessionDir, { recursive: true });
 
+    // Immediately write initial metadata so 5-second polling NEVER sees an uninitialized directory
+    if (jobName || jobId) {
+      try {
+        await this.syncJobMetadata(sessionDir, jobId, jobName, timestamp);
+      } catch {}
+    }
+
     // Migrate any legacy session_offline_ directory into sessionDir
     const legacyOfflineDir = path.join(CAPTURES_DIR, `session_offline_${timestamp}`);
     try {
@@ -646,6 +666,10 @@ class MonitorService {
       sessionId,
       remoteSessionId,
       sessionTimestamp: timestamp,
+      jobName,
+      jobId,
+      targetSessionIds,
+      remoteFrameCounts,
       overallProgress: 0,
       progress: 0,
       totalFramesExpected,
@@ -920,7 +944,14 @@ class MonitorService {
           }
 
           if (!meta || !meta.modelName) {
-            const synced = await this.syncJobMetadata(sessionPath, meta?.jobId || meta?.job_id || null, meta?.displayName || meta?.job_name || null, timestamp);
+            const fetchJobId = (this.fetchStatus?.sessionId === entry.name) ? this.fetchStatus.jobId : null;
+            const fetchJobName = (this.fetchStatus?.sessionId === entry.name) ? this.fetchStatus.jobName : null;
+            const synced = await this.syncJobMetadata(
+              sessionPath,
+              meta?.jobId || meta?.job_id || fetchJobId || null,
+              meta?.displayName || meta?.job_name || fetchJobName || null,
+              timestamp
+            );
             if (synced) {
               meta = synced;
               if (synced.hasThumbnail) hasThumbnail = true;
@@ -997,12 +1028,29 @@ class MonitorService {
                       }
 
                       if (!targetDate) {
-                        // When a session entry in sessions.jsonl lacks a timestamp, derive a distinct
-                        // fallback timestamp per session index so s0001 and s0002 never collide!
                         const sessNum = parseInt(String(data.session || '').replace(/\D+/g, ''), 10) || (lineIdx + 1);
-                        const baseMs = Date.now() - Math.max(0, (lines.length - lineIdx)) * 3600000;
-                        targetDate = new Date(baseMs + sessNum * 1000);
-                        timestamp = generateSessionTimestamp(targetDate);
+                        const existingLocal = sessions.find(s =>
+                          (data.job_id && s.meta?.jobId === data.job_id) ||
+                          (data.job_name && (s.meta?.displayName === data.job_name || s.meta?.modelName === parsePrusaFilename(data.job_name)?.modelName))
+                        );
+                        if (existingLocal && existingLocal.timestamp && existingLocal.timestamp.length >= 15) {
+                          timestamp = existingLocal.timestamp;
+                          try {
+                            const year = parseInt(timestamp.substring(0, 4), 10);
+                            const month = parseInt(timestamp.substring(4, 6), 10) - 1;
+                            const day = parseInt(timestamp.substring(6, 8), 10);
+                            const hour = parseInt(timestamp.substring(9, 11), 10);
+                            const min = parseInt(timestamp.substring(11, 13), 10);
+                            const sec = parseInt(timestamp.substring(13, 15), 10);
+                            targetDate = new Date(year, month, day, hour, min, sec);
+                          } catch (e) {
+                            targetDate = new Date();
+                          }
+                        } else {
+                          const baseEpoch = 1793000000000 + (data.job_id || sessNum) * 3600000 + sessNum * 1000;
+                          targetDate = new Date(baseEpoch);
+                          timestamp = generateSessionTimestamp(targetDate);
+                        }
                       }
                       
                       // Merge remote sessions across DIFFERENT cameras when they represent the same print
@@ -1050,11 +1098,12 @@ class MonitorService {
           }
 
       // Step B: Reconcile remote sessions with local sessions (runs on EVERY call, even without includeRemote)
+      const unmergedRemotes = [];
       if (this.remoteSessionsCache && this.remoteSessionsCache.length > 0) {
         const config = await this.getConfig();
         const cameraIps = config?.cameraIps || [];
 
-        this.remoteSessionsCache = this.remoteSessionsCache.filter(remote => {
+        for (const remote of this.remoteSessionsCache) {
           const matchingLocal = sessions.find(local => {
             if (local.isRemote) return false;
             if (local.timestamp && remote.timestamp && local.timestamp === remote.timestamp) return true;
@@ -1104,27 +1153,32 @@ class MonitorService {
               }
             }
 
-            matchingLocal.remoteSessionIds = remote.remoteSessionIds;
-            matchingLocal.remoteFrameCounts = remote.remoteFrameCounts;
+            matchingLocal.remoteSessionIds = { ...(matchingLocal.remoteSessionIds || {}), ...remote.remoteSessionIds };
+            matchingLocal.remoteFrameCounts = { ...(matchingLocal.remoteFrameCounts || {}), ...remote.remoteFrameCounts };
             if (allFramesDownloaded) {
               matchingLocal.isSynced = true;
             } else {
               matchingLocal.isIncomplete = true;
             }
-            return false; // Reconciled into local session card, remove duplicate remote card!
+            continue; // Reconciled into local session card, don't show separate remote card!
           }
 
           // If this remote session is currently being fetched, don't show separate remote card
-          if (this.fetchStatus?.isFetching && this.fetchStatus.remoteSessionId === remote.id) {
-            return false;
+          if (this.fetchStatus?.isFetching && (
+            this.fetchStatus.remoteSessionId === remote.id ||
+            this.fetchStatus.sessionTimestamp === remote.timestamp
+          )) {
+            continue;
           }
 
-          return true; // Genuine unsynced remote session
-        });
+          unmergedRemotes.push(remote); // Genuine unsynced remote session
+        }
       }
 
-      // Add cached remote sessions to the local sessions
-      sessions.push(...this.remoteSessionsCache);
+      // Add cached remote sessions only if explicitly requested (e.g. Check Camera SD)
+      if (includeRemote) {
+        sessions.push(...unmergedRemotes);
+      }
 
       // Normalize sync metrics across all sessions
       for (const s of sessions) {
