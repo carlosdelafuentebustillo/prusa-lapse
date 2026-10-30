@@ -1095,9 +1095,10 @@ export default function Home() {
         {totalFramesLocal > 0 ? (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '10px' }}>
             {session.cameras.map((cam, idx) => {
-              const hasVideo = session.videos.includes(`camera_${idx}.mp4`);
-              const isThisCompiling = compilingStatus?.sessionId === session.id && compilingStatus?.cameraIndex === idx;
-              const camLabel = getCameraDisplayName(idx);
+              const camIndex = cam.cameraIndex ?? (typeof cam.name === 'string' && cam.name.startsWith('camera_') ? parseInt(cam.name.replace('camera_', ''), 10) : idx);
+              const hasVideo = session.videos.includes(`camera_${camIndex}.mp4`);
+              const isThisCompiling = compilingStatus?.sessionId === session.id && compilingStatus?.cameraIndex === camIndex;
+              const camLabel = getCameraDisplayName(camIndex);
 
               return (
                 <div key={cam.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', padding: '8px 12px', background: 'rgba(0,0,0,0.25)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)' }}>
@@ -1110,8 +1111,8 @@ export default function Home() {
                     <select
                       className="input-field"
                       style={{ width: 'auto', padding: '4px 6px', fontSize: '0.72rem' }}
-                      value={cameraRotations[idx] ?? (idx === 1 ? 90 : 0)}
-                      onChange={(e) => setCameraRotations(prev => ({ ...prev, [idx]: parseInt(e.target.value, 10) }))}
+                      value={cameraRotations[camIndex] ?? (camIndex === 1 ? 90 : 0)}
+                      onChange={(e) => setCameraRotations(prev => ({ ...prev, [camIndex]: parseInt(e.target.value, 10) }))}
                       title="Video Rotation"
                     >
                       <option value="0">0°</option>
@@ -1124,7 +1125,7 @@ export default function Home() {
                       <button
                         className="btn btn-primary btn-small"
                         style={{ width: 'auto', padding: '5px 10px', fontSize: '0.75rem' }}
-                        onClick={() => setActiveVideo({ session: session.id, title, camera: `camera_${idx}`, cameraLabel: camLabel, timestamp: Date.now() })}
+                        onClick={() => setActiveVideo({ session: session.id, title, camera: `camera_${camIndex}`, cameraLabel: camLabel, timestamp: Date.now() })}
                       >
                         Play
                       </button>
@@ -1134,14 +1135,14 @@ export default function Home() {
                       className={`btn btn-small ${hasVideo ? 'btn-ghost' : 'btn-secondary'}`}
                       style={{ width: 'auto', padding: '5px 10px', fontSize: '0.75rem' }}
                       disabled={cam.frameCount === 0 || isThisCompiling || !!compilingStatus}
-                      onClick={() => handleCompile(session.id, idx)}
+                      onClick={() => handleCompile(session.id, camIndex)}
                     >
                       {isThisCompiling ? 'Compiling…' : hasVideo ? 'Re-compile' : 'Compile MP4'}
                     </button>
 
                     {hasVideo && (
                       <a
-                        href={`/api/captures?session=${session.id}&file=camera_${idx}.mp4&t=${Date.now()}`}
+                        href={`/api/captures?session=${session.id}&file=camera_${camIndex}.mp4&t=${Date.now()}`}
                         download={`${title.replace(/[^a-z0-9-_]+/gi, '_')}_${camLabel}.mp4`}
                         className="btn btn-ghost btn-small"
                         style={{ width: 'auto', padding: '5px 8px', textDecoration: 'none', fontSize: '0.75rem' }}
@@ -1152,7 +1153,7 @@ export default function Home() {
                     )}
 
                     <a
-                      href={`/api/captures/zip?session=${session.id}&camera=camera_${idx}`}
+                      href={`/api/captures/zip?session=${session.id}&camera=camera_${camIndex}`}
                       className="btn btn-ghost btn-small"
                       style={{ width: 'auto', padding: '5px 8px', textDecoration: 'none', fontSize: '0.75rem', pointerEvents: cam.frameCount === 0 ? 'none' : 'auto', opacity: cam.frameCount === 0 ? 0.4 : 1 }}
                       title="Download RAW Frames ZIP"
