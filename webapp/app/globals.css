@@ -511,12 +511,12 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 10px 0;
-  margin-bottom: 15px;
+  padding: 8px 0;
+  margin-bottom: 12px;
 }
 
 .calendar-month-title {
-  font-size: 1.2rem;
+  font-size: 1.15rem;
   font-weight: 700;
   color: var(--text-primary);
   text-transform: uppercase;
@@ -525,7 +525,8 @@ body {
 
 .calendar-grid {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-rows: 36px repeat(6, 115px);
   gap: 1px;
   background-color: var(--border-color);
   border: 1px solid var(--border-color);
@@ -537,64 +538,176 @@ body {
 .calendar-day-header {
   background: rgba(255, 255, 255, 0.03);
   text-align: center;
-  padding: 10px;
   font-weight: 600;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   color: var(--text-secondary);
   text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
 }
 
 .calendar-cell {
   background: var(--bg-input);
-  min-height: 100px;
-  padding: 8px;
+  height: 115px;
+  max-height: 115px;
+  padding: 6px 8px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  box-sizing: border-box;
+  overflow: hidden;
+  transition: background 0.15s ease;
+}
+
+.calendar-cell:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .calendar-cell.other-month {
   background: var(--bg-surface);
-  opacity: 0.5;
+  opacity: 0.45;
+}
+
+.calendar-cell.today {
+  box-shadow: inset 0 0 0 1px rgba(250, 104, 49, 0.4);
 }
 
 .calendar-date-number {
-  font-size: 0.9rem;
+  font-size: 0.8rem;
   font-weight: 600;
   color: var(--text-secondary);
-  margin-bottom: 6px;
+  margin-bottom: 3px;
   text-align: right;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.calendar-cell.today .calendar-date-number {
+  color: var(--color-orange);
+  font-weight: 700;
+}
+
+.calendar-sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+.calendar-sessions-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.calendar-sessions-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.calendar-sessions-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
 }
 
 .session-pill {
+  position: relative;
   background: var(--color-primary);
   color: #fff;
   border-radius: 4px;
-  padding: 4px 6px;
-  font-size: 0.75rem;
+  padding: 3px 6px;
+  font-size: 0.72rem;
   font-weight: 600;
   cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  transition: opacity 0.2s, transform 0.2s;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
+  min-width: 0;
+  width: 100%;
+  min-height: 22px;
+  max-height: 22px;
+  box-sizing: border-box;
+  user-select: none;
+  transition: opacity 0.2s, box-shadow 0.2s;
+  overflow: hidden;
 }
 
 .session-pill:hover {
-  opacity: 0.9;
-  transform: translateY(-1px);
+  filter: brightness(1.15);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
 }
 
 .session-pill.offline {
-  background: var(--color-danger);
+  background: rgba(232, 83, 63, 0.85);
+  border: 1px solid rgba(232, 83, 63, 0.3);
+}
+
+.session-pill.active {
+  background: rgba(250, 104, 49, 0.9);
+  border: 1px solid rgba(250, 104, 49, 0.4);
 }
 
 .session-pill.selected {
   outline: 2px solid #fff;
-  outline-offset: -2px;
+  outline-offset: -1px;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
+}
+
+.pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.pill-dot.active-dot {
+  background: #ffaa00;
+  animation: pulse 1.5s infinite;
+}
+
+.session-pill-track {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+  line-height: 1.2;
+}
+
+.session-pill-label {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  width: 100%;
+  will-change: transform;
+}
+
+.session-pill:hover .session-pill-label.overflowing {
+  width: max-content;
+  max-width: none;
+  text-overflow: clip;
+  animation: pill-marquee var(--marquee-duration, 3s) ease-in-out infinite alternate;
+}
+
+@keyframes pill-marquee {
+  0%, 15% {
+    transform: translateX(0);
+  }
+  85%, 100% {
+    transform: translateX(var(--marquee-offset, 0px));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-pill:hover .session-pill-label.overflowing {
+    animation: none;
+    transform: none;
+  }
 }
 
 .session-header {

@@ -1,8 +1,66 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import CameraCard from './components/CameraCard';
 import SlicerPanel from './components/SlicerPanel';
+
+function CalendarSessionPill({ session, title, time, isSelected, onClick }) {
+  const trackRef = useRef(null);
+  const labelRef = useRef(null);
+  const [isOverflowing, setIsOverflowing] = useState(false);
+  const [overflowDistance, setOverflowDistance] = useState(0);
+  const [duration, setDuration] = useState('3s');
+
+  const checkOverflow = useCallback(() => {
+    if (trackRef.current && labelRef.current) {
+      const trackWidth = trackRef.current.clientWidth;
+      const textWidth = labelRef.current.scrollWidth;
+      const diff = textWidth - trackWidth;
+      if (diff > 2) {
+        setIsOverflowing(true);
+        const dist = diff + 8;
+        setOverflowDistance(dist);
+        const dur = Math.max(2.5, Number((dist / 32).toFixed(1)));
+        setDuration(`${dur}s`);
+      } else {
+        setIsOverflowing(false);
+        setOverflowDistance(0);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    checkOverflow();
+  }, [title, checkOverflow]);
+
+  useEffect(() => {
+    window.addEventListener('resize', checkOverflow);
+    return () => window.removeEventListener('resize', checkOverflow);
+  }, [checkOverflow]);
+
+  return (
+    <div
+      className={`session-pill ${session.isRemote ? 'offline' : ''} ${session.isActive ? 'active' : ''} ${isSelected ? 'selected' : ''}`}
+      onClick={onClick}
+      onMouseEnter={checkOverflow}
+      title={`${title}${time ? ` (${time})` : ''}`}
+    >
+      {session.isActive && <span className="pill-dot active-dot" />}
+      <span className="session-pill-track" ref={trackRef}>
+        <span
+          ref={labelRef}
+          className={`session-pill-label ${isOverflowing ? 'overflowing' : ''}`}
+          style={{
+            '--marquee-offset': `-${overflowDistance}px`,
+            '--marquee-duration': duration,
+          }}
+        >
+          {title}
+        </span>
+      </span>
+    </div>
+  );
+}
 
 const parseSessionDate = (timestamp) => {
   if (!timestamp || timestamp.length < 15) return null;
@@ -89,7 +147,6 @@ export default function Home() {
   const [printerOfflineWarning, setPrinterOfflineWarning] = useState(false);
   const [configCollapsed, setConfigCollapsed] = useState(true);
   const [showLogs, setShowLogs] = useState(false);
-  const [viewMode, setViewMode] = useState('list'); // 'list' | 'calendar'
   const [selectedSessionId, setSelectedSessionId] = useState(null);
   const [editingSessionId, setEditingSessionId] = useState(null);
   const [editingSessionName, setEditingSessionName] = useState('');
@@ -631,6 +688,7 @@ export default function Home() {
             if (activeVideo && activeVideo.session === sessionId) {
               setActiveVideo(null);
             }
+            setSelectedSessionId(prev => prev === sessionId ? null : prev);
           } else {
             const err = await res.json();
             addToast(`Failed to delete: ${err.error}`, 'error');
@@ -652,6 +710,7 @@ export default function Home() {
             fetchSessions();
             addToast('All local sessions cleared', 'success');
             setActiveVideo(null);
+            setSelectedSessionId(null);
           } else {
             const err = await res.json();
             addToast(`Failed: ${err.error}`, 'error');
@@ -770,6 +829,7 @@ export default function Home() {
 
   const calendarDays = generateCalendarDays();
   const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const todayDateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
   // Check if any camera reports an active print
   const activePrintCamera = Object.values(cameraSettings).find(c => c && (c.printer_state === 'PRINTING' || c.printer_state === 'PAUSED'));
@@ -1260,14 +1320,6 @@ export default function Home() {
               </select>
 
               <button
-                className="btn btn-ghost btn-small"
-                onClick={() => setViewMode(v => v === 'list' ? 'calendar' : 'list')}
-                style={{ width: 'auto', padding: '5px 10px', fontSize: '0.75rem' }}
-              >
-                {viewMode === 'list' ? 'Calendar View' : 'List View'}
-              </button>
-
-              <button
                 className="btn btn-secondary btn-small"
                 onClick={() => fetchSessions(true)}
                 style={{ width: 'auto', padding: '5px 12px', fontSize: '0.75rem' }}
@@ -1319,14 +1371,22 @@ export default function Home() {
             <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
               No timelapse sessions yet. Start a print on your Prusa printer or click <strong>Check Camera SD</strong> to sync finished prints.
             </div>
-          ) : viewMode === 'list' ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {displaySessions.map(session => renderSessionCard(session))}
-            </div>
           ) : (
             <>
               {selectedSessionId && displaySessions.find(s => s.id === selectedSessionId) && (
                 <div style={{ marginBottom: '16px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                    <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                      Selected Session Details:
+                    </span>
+                    <button
+                      className="btn btn-ghost btn-small"
+                      style={{ width: 'auto', padding: '3px 8px', fontSize: '0.75rem' }}
+                      onClick={() => setSelectedSessionId(null)}
+                    >
+                      ✕ Close Details
+                    </button>
+                  </div>
                   {renderSessionCard(displaySessions.find(s => s.id === selectedSessionId))}
                 </div>
               )}
@@ -1346,23 +1406,24 @@ export default function Home() {
                     const dObj = parseSessionDate(s.timestamp);
                     return dObj && dObj.dateStr === cDay.dateStr;
                   }) : [];
+                  const isToday = cDay.dateStr === todayDateStr;
 
                   return (
-                    <div key={i} className={`calendar-cell ${cDay.isOtherMonth ? 'other-month' : ''}`}>
+                    <div key={i} className={`calendar-cell ${cDay.isOtherMonth ? 'other-month' : ''} ${isToday ? 'today' : ''}`}>
                       <div className="calendar-date-number">{cDay.day}</div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', overflowY: 'auto', flex: 1 }}>
+                      <div className="calendar-sessions-list">
                         {daySessions.map(sess => {
                           const sObj = parseSessionDate(sess.timestamp);
                           const pillTitle = getSessionDisplayName(sess, sObj);
                           return (
-                            <div
+                            <CalendarSessionPill
                               key={sess.id}
-                              className={`session-pill ${sess.isRemote ? 'offline' : ''} ${selectedSessionId === sess.id ? 'selected' : ''}`}
+                              session={sess}
+                              title={pillTitle}
+                              time={sObj?.time}
+                              isSelected={selectedSessionId === sess.id}
                               onClick={() => setSelectedSessionId(prev => prev === sess.id ? null : sess.id)}
-                              title={`${pillTitle} (${sObj?.time || ''})`}
-                            >
-                              {pillTitle}
-                            </div>
+                            />
                           );
                         })}
                       </div>
