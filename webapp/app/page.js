@@ -1021,46 +1021,38 @@ export default function Home() {
             )}
 
             {/* Right: Button */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              {session.isActive ? (
-                <button
-                  className={`btn btn-small ${isMonitoring ? 'btn-danger' : 'btn-ghost'}`}
-                  style={{ width: 'auto', padding: '5px 12px', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
-                  onClick={toggleMonitoring}
-                  disabled={isTesting}
-                  title={isMonitoring ? "Stop streaming frames to PC" : "Stream frames directly from cameras to PC in real-time"}
-                >
-                  {isMonitoring ? `Stop Live Sync (${frameCount})` : 'Start Live PC Sync'}
-                </button>
-              ) : displayPercent < 100 ? (
-                <button
-                  className={`btn btn-small ${totalFramesLocal > 0 ? 'btn-secondary' : 'btn-primary'}`}
-                  style={{ width: 'auto', padding: '5px 12px', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
-                  disabled={isMonitoring || (fetchStatus?.isFetching && !isCurrentFetching) || (fetchingSessionId !== null && !isCurrentFetching)}
-                  onClick={() => handleFetchOffline(session)}
-                  title={totalFramesLocal > 0 ? 'Resume downloading missing frames from SD card' : 'Sync session frames from camera SD card'}
-                >
-                  {isCurrentFetching ? (
-                    <>
-                      <span className="spinner" style={{ width: '12px', height: '12px' }} />
-                      <span>{`Syncing… ${displayPercent}%`}</span>
-                    </>
-                  ) : (
-                    <span>{totalFramesLocal > 0 ? 'Resume Sync' : 'Sync Session'}</span>
-                  )}
-                </button>
-              ) : (
-                <button
-                  className="btn btn-ghost btn-small"
-                  style={{ width: 'auto', padding: '4px 10px', fontSize: '0.72rem', opacity: 0.7 }}
-                  disabled={isMonitoring || fetchStatus?.isFetching || fetchingSessionId !== null}
-                  onClick={() => handleFetchOffline(session)}
-                  title="Re-verify or re-sync frames from camera SD card"
-                >
-                  Re-sync
-                </button>
-              )}
-            </div>
+            {!session.isActive && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {displayPercent < 100 ? (
+                  <button
+                    className={`btn btn-small ${totalFramesLocal > 0 ? 'btn-secondary' : 'btn-primary'}`}
+                    style={{ width: 'auto', padding: '5px 12px', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                    disabled={isMonitoring || (fetchStatus?.isFetching && !isCurrentFetching) || (fetchingSessionId !== null && !isCurrentFetching)}
+                    onClick={() => handleFetchOffline(session)}
+                    title={totalFramesLocal > 0 ? 'Resume downloading missing frames from SD card' : 'Sync session frames from camera SD card'}
+                  >
+                    {isCurrentFetching ? (
+                      <>
+                        <span className="spinner" style={{ width: '12px', height: '12px' }} />
+                        <span>{`Syncing… ${displayPercent}%`}</span>
+                      </>
+                    ) : (
+                      <span>{totalFramesLocal > 0 ? 'Resume Sync' : 'Sync Session'}</span>
+                    )}
+                  </button>
+                ) : (
+                  <button
+                    className="btn btn-ghost btn-small"
+                    style={{ width: 'auto', padding: '4px 10px', fontSize: '0.72rem', opacity: 0.7 }}
+                    disabled={isMonitoring || fetchStatus?.isFetching || fetchingSessionId !== null}
+                    onClick={() => handleFetchOffline(session)}
+                    title="Re-verify or re-sync frames from camera SD card"
+                  >
+                    Re-sync
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Sub-status: Active camera frame counts for active print */}
@@ -1205,27 +1197,6 @@ export default function Home() {
                 </span>
               )}
             </span>
-
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <button
-                className={`btn btn-small ${isMonitoring ? 'btn-danger' : 'btn-ghost'}`}
-                onClick={toggleMonitoring}
-                disabled={isTesting}
-                style={{ width: 'auto', padding: '6px 12px', fontSize: '0.78rem' }}
-                title="Stream frames directly from camera RAM to this PC while printing"
-              >
-                {isMonitoring ? `Stop Live Sync (${frameCount})` : 'Start Live PC Sync'}
-              </button>
-
-              <button
-                className="btn btn-ghost btn-small"
-                onClick={handleTestCameras}
-                disabled={isTesting}
-                style={{ width: 'auto', padding: '6px 12px', fontSize: '0.78rem' }}
-              >
-                {isTesting ? 'Testing…' : 'Test Capture'}
-              </button>
-            </div>
           </h2>
 
           <div className="cameras-grid">
