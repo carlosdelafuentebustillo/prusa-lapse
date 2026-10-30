@@ -3,16 +3,29 @@
 import { useState, useEffect } from 'react';
 
 function SnapshotImage({ ip, idx }) {
-  const [snapshotUrl, setSnapshotUrl] = useState(null);
-  const [error, setError] = useState(false);
+  const [snapshotUrl, setSnapshotUrl] = useState(`http://${ip}/snapshot.jpg?t=${Date.now()}`);
+  const [lastGoodUrl, setLastGoodUrl] = useState(null);
+  const [consecutiveErrors, setConsecutiveErrors] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   useEffect(() => {
-    setSnapshotUrl(`http://${ip}/snapshot.jpg?t=${Date.now()}`);
-    setError(false);
+    const initialUrl = `http://${ip}/snapshot.jpg?t=${Date.now()}`;
+    setSnapshotUrl(initialUrl);
 
+    // Preload image updates in background every 10s so busy camera locks (e.g. during layer capture)
+    // never wipe out the current live view or get permanently stuck
     const interval = setInterval(() => {
-      setSnapshotUrl(`http://${ip}/snapshot.jpg?t=${Date.now()}`);
+      const nextUrl = `http://${ip}/snapshot.jpg?t=${Date.now()}`;
+      const preload = new Image();
+      preload.onload = () => {
+        setSnapshotUrl(nextUrl);
+        setLastGoodUrl(nextUrl);
+        setConsecutiveErrors(0);
+      };
+      preload.onerror = () => {
+        setConsecutiveErrors(prev => prev + 1);
+      };
+      preload.src = nextUrl;
     }, 10000);
 
     return () => clearInterval(interval);
@@ -20,11 +33,24 @@ function SnapshotImage({ ip, idx }) {
 
   const handleRefresh = () => {
     setIsRefreshing(true);
-    setSnapshotUrl(`http://${ip}/snapshot.jpg?t=${Date.now()}&fresh=1`);
-    setError(false);
+    const freshUrl = `http://${ip}/snapshot.jpg?t=${Date.now()}&fresh=1`;
+    const preload = new Image();
+    preload.onload = () => {
+      setSnapshotUrl(freshUrl);
+      setLastGoodUrl(freshUrl);
+      setConsecutiveErrors(0);
+      setIsRefreshing(false);
+    };
+    preload.onerror = () => {
+      setConsecutiveErrors(prev => prev + 1);
+      setIsRefreshing(false);
+    };
+    preload.src = freshUrl;
   };
 
-  if (error) {
+  const isHardError = consecutiveErrors >= 4 && !lastGoodUrl;
+
+  if (isHardError) {
     return (
       <div
         onClick={handleRefresh}
@@ -35,17 +61,42 @@ function SnapshotImage({ ip, idx }) {
     );
   }
 
+  const activeDisplayUrl = lastGoodUrl || snapshotUrl;
+
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       <img
-        src={snapshotUrl}
+        src={activeDisplayUrl}
         alt={`Snapshot Camera ${idx + 1}`}
         style={{ width: '100%', height: 'auto', display: 'block', cursor: 'pointer' }}
         onClick={handleRefresh}
-        onLoad={() => setIsRefreshing(false)}
-        onError={() => setError(true)}
+        onLoad={() => {
+          setLastGoodUrl(activeDisplayUrl);
+          setConsecutiveErrors(0);
+          setIsRefreshing(false);
+        }}
+        onError={() => {
+          setConsecutiveErrors(prev => prev + 1);
+          setIsRefreshing(false);
+        }}
         title="Click to capture a fresh snapshot"
       />
+      {consecutiveErrors >= 3 && lastGoodUrl && (
+        <div style={{
+          position: 'absolute',
+          bottom: '8px',
+          right: '8px',
+          background: 'rgba(0,0,0,0.7)',
+          backdropFilter: 'blur(4px)',
+          color: '#ffaa00',
+          fontSize: '0.7rem',
+          padding: '2px 8px',
+          borderRadius: '4px',
+          pointerEvents: 'none'
+        }}>
+          Reconnecting…
+        </div>
+      )}
       <div
         className={isRefreshing ? 'refresh-glow' : ''}
         style={{ position: 'absolute', inset: 0, pointerEvents: 'none', borderRadius: '8px' }}
