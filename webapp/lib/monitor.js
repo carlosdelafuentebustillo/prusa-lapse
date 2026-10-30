@@ -1116,7 +1116,8 @@ class MonitorService {
             // Match by active sync status
             if (this.fetchStatus?.isFetching && (
               (this.fetchStatus.remoteSessionId === remote.id && this.fetchStatus.sessionId === local.id) ||
-              (this.fetchStatus.sessionTimestamp === remote.timestamp && this.fetchStatus.sessionId === local.id)
+              (this.fetchStatus.sessionTimestamp === remote.timestamp && this.fetchStatus.sessionId === local.id) ||
+              (remote.jobId && this.fetchStatus.jobId === remote.jobId && this.fetchStatus.sessionId === local.id)
             )) return true;
 
             // Never match if timestamps explicitly conflict by > 10 minutes
@@ -1161,6 +1162,13 @@ class MonitorService {
 
             matchingLocal.remoteSessionIds = { ...(matchingLocal.remoteSessionIds || {}), ...remote.remoteSessionIds };
             matchingLocal.remoteFrameCounts = { ...(matchingLocal.remoteFrameCounts || {}), ...remote.remoteFrameCounts };
+            if (remote.jobId && (!matchingLocal.meta?.jobId || !matchingLocal.jobId)) {
+              if (!matchingLocal.meta) matchingLocal.meta = {};
+              matchingLocal.meta.jobId = remote.jobId;
+              matchingLocal.jobId = remote.jobId;
+              const metaPath = path.join(CAPTURES_DIR, matchingLocal.id, 'meta.json');
+              fs.writeFile(metaPath, JSON.stringify(matchingLocal.meta, null, 2), 'utf-8').catch(() => {});
+            }
             if (allFramesDownloaded) {
               matchingLocal.isSynced = true;
             } else {
@@ -1172,7 +1180,8 @@ class MonitorService {
           // If this remote session is currently being fetched, don't show separate remote card
           if (this.fetchStatus?.isFetching && (
             this.fetchStatus.remoteSessionId === remote.id ||
-            this.fetchStatus.sessionTimestamp === remote.timestamp
+            this.fetchStatus.sessionTimestamp === remote.timestamp ||
+            (remote.jobId && this.fetchStatus.jobId === remote.jobId)
           )) {
             continue;
           }
