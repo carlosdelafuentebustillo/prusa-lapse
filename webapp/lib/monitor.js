@@ -979,8 +979,8 @@ class MonitorService {
         }
       }
       
-      // Fetch remote sessions only if explicitly requested (e.g. Refresh button clicked)
-      if (includeRemote) {
+      // Fetch remote sessions from cameras if explicitly requested or if cache is empty
+      if (includeRemote || !this.remoteSessionsCache || this.remoteSessionsCache.length === 0) {
         this.remoteSessionsCache = [];
         const config = await this.getConfig();
         if (config && config.cameraIps) {
@@ -1109,35 +1109,41 @@ class MonitorService {
             if (local.timestamp && remote.timestamp && local.timestamp === remote.timestamp) return true;
             if (remote.jobId && (local.jobId === remote.jobId || local.meta?.jobId === remote.jobId)) return true;
 
+            // Never match if job IDs explicitly conflict
+            const localJobId = local.jobId || local.meta?.jobId;
+            if (remote.jobId && localJobId && remote.jobId !== localJobId) return false;
+
             // Match by active sync status
             if (this.fetchStatus?.isFetching && (
               (this.fetchStatus.remoteSessionId === remote.id && this.fetchStatus.sessionId === local.id) ||
               (this.fetchStatus.sessionTimestamp === remote.timestamp && this.fetchStatus.sessionId === local.id)
             )) return true;
 
-            // Match by remote session IDs (e.g. s0006)
-            if (local.remoteSessionIds && remote.remoteSessionIds) {
-              const localIds = Object.values(local.remoteSessionIds);
-              const remoteIds = Object.values(remote.remoteSessionIds);
-              if (localIds.some(id => remoteIds.includes(id))) return true;
-            }
-
-            // Match by filename / job name
-            const localName = local.meta?.displayName || local.jobName || local.meta?.modelName;
-            const remoteName = remote.jobName || remote.meta?.displayName || remote.meta?.modelName;
-            if (localName && remoteName && (localName === remoteName || (local.meta?.modelName && local.meta.modelName === remote.meta?.modelName))) {
-              return true;
-            }
-
+            // Never match if timestamps explicitly conflict by > 10 minutes
             if (remote.hasExplicitTimestamp && local.timestamp) {
               try {
                 const parseTs = (ts) => new Date(
                   parseInt(ts.slice(0, 4), 10), parseInt(ts.slice(4, 6), 10) - 1, parseInt(ts.slice(6, 8), 10),
                   parseInt(ts.slice(9, 11), 10), parseInt(ts.slice(11, 13), 10), parseInt(ts.slice(13, 15), 10)
                 ).getTime();
-                if (Math.abs(parseTs(local.timestamp) - parseTs(remote.timestamp)) < 120000) return true;
+                if (Math.abs(parseTs(local.timestamp) - parseTs(remote.timestamp)) > 600000) return false;
               } catch {}
             }
+
+            // Match by remote session IDs on the same camera IP
+            if (local.remoteSessionIds && remote.remoteSessionIds) {
+              for (const [camIp, sid] of Object.entries(remote.remoteSessionIds)) {
+                if (local.remoteSessionIds[camIp] === sid) return true;
+              }
+            }
+
+            // Match by exact displayName only if timestamps/jobIds did not conflict
+            const localName = local.meta?.displayName || local.jobName;
+            const remoteName = remote.jobName || remote.meta?.displayName;
+            if (localName && remoteName && localName === remoteName) {
+              return true;
+            }
+
             return false;
           });
 
@@ -1175,10 +1181,8 @@ class MonitorService {
         }
       }
 
-      // Add cached remote sessions only if explicitly requested (e.g. Check Camera SD)
-      if (includeRemote) {
-        sessions.push(...unmergedRemotes);
-      }
+      // Always include unmerged remote sessions so unsynced prints on camera SD cards stay visible
+      sessions.push(...unmergedRemotes);
 
       // Normalize sync metrics across all sessions
       for (const s of sessions) {
