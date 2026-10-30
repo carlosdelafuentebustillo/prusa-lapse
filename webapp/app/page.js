@@ -303,15 +303,21 @@ export default function Home() {
       .then(res => res.json())
       .then(data => {
         if (data.sessions) {
-          // Client-side deduplication safeguard: if a local session exists for a print, never render a duplicate remote card
-          const localKeys = new Set();
+          // Client-side deduplication safeguard: if a local session exists for a specific print, never render a duplicate remote card
+          const localTimestamps = new Set();
+          const localJobIds = new Set();
+          const localRemoteIdsByIp = new Map();
+
           data.sessions.forEach(s => {
             if (!s.isRemote) {
-              if (s.timestamp) localKeys.add(s.timestamp);
-              if (s.meta?.displayName) localKeys.add(s.meta.displayName);
-              if (s.meta?.modelName) localKeys.add(s.meta.modelName);
-              if (s.jobName) localKeys.add(s.jobName);
-              if (s.remoteSessionIds) Object.values(s.remoteSessionIds).forEach(id => localKeys.add(id));
+              if (s.timestamp) localTimestamps.add(s.timestamp);
+              if (s.meta?.jobId) localJobIds.add(s.meta.jobId);
+              if (s.jobId) localJobIds.add(s.jobId);
+              if (s.remoteSessionIds) {
+                Object.entries(s.remoteSessionIds).forEach(([ip, sid]) => {
+                  localRemoteIdsByIp.set(`${ip}:${sid}`, true);
+                });
+              }
             }
           });
 
@@ -320,11 +326,11 @@ export default function Home() {
             if (fetchStatus?.isFetching && (fetchStatus.remoteSessionId === s.id || fetchStatus.sessionTimestamp === s.timestamp)) {
               return false;
             }
-            if (s.timestamp && localKeys.has(s.timestamp)) return false;
-            if (s.jobName && localKeys.has(s.jobName)) return false;
-            if (s.meta?.displayName && localKeys.has(s.meta.displayName)) return false;
-            if (s.meta?.modelName && localKeys.has(s.meta.modelName)) return false;
-            if (s.remoteSessionIds && Object.values(s.remoteSessionIds).some(id => localKeys.has(id))) return false;
+            if (s.timestamp && localTimestamps.has(s.timestamp)) return false;
+            if (s.jobId && localJobIds.has(s.jobId)) return false;
+            if (s.remoteSessionIds && Object.entries(s.remoteSessionIds).some(([ip, sid]) => localRemoteIdsByIp.has(`${ip}:${sid}`))) {
+              return false;
+            }
             return true;
           });
 
