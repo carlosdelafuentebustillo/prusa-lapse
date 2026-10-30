@@ -22,7 +22,7 @@ int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 11
-#define FIRMWARE_VERSION "v1.2.7"
+#define FIRMWARE_VERSION "v1.2.8"
 
 bool offlineMode = false;
 bool sdCardAvailable = false;
@@ -931,6 +931,7 @@ void sdWriteTask(void *pvParameters) {
         } else {
           snprintf(filename, sizeof(filename), "/lapse/frame_%04d.jpg", offlineFrameCount);
         }
+        static int consecutiveSdWriteFailures = 0;
         if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
         File file = SD_MMC.open(filename, FILE_WRITE);
         if (file) {
@@ -938,8 +939,22 @@ void sdWriteTask(void *pvParameters) {
           file.close();
           Serial.printf("Background Task: Saved photo to SD: %s\n", filename);
           offlineFrameCount++; // Increment only on successful save
+          consecutiveSdWriteFailures = 0;
         } else {
-          Serial.printf("Background Task: Failed to save to SD: %s\n", filename);
+          consecutiveSdWriteFailures++;
+          Serial.printf("Background Task: Failed to save to SD: %s (%d consecutive)\n", filename, consecutiveSdWriteFailures);
+          if (consecutiveSdWriteFailures >= 2) {
+            Serial.println("Attempting SD Card remount recovery...");
+            SD_MMC.end();
+            vTaskDelay(pdMS_TO_TICKS(150));
+            if (SD_MMC.begin("/sdcard", true)) {
+              SD_MMC.mkdir("/lapse");
+              Serial.println("SD Card remounted successfully.");
+              consecutiveSdWriteFailures = 0;
+            } else {
+              Serial.println("SD Card remount failed.");
+            }
+          }
         }
         if (sd_mutex) xSemaphoreGive(sd_mutex);
       } else if (!sdCardAvailable) {
@@ -2084,10 +2099,10 @@ void setup() {
                 if (maxConfirmedZ < 0.0f || (axis_z < maxConfirmedZ - 0.30f && zStableCount >= 3)) {
                   // Initialize baseline Z once stable at first layer (or re-lock after pre-print Z=4mm/15mm park drop)
                   if (zStableCount >= 3) {
-                    maxConfirmedZ = axis_z;
-                    activeTriggerMode = "smart_z";
-                    Serial.printf("PrusaLink Polling: SMART Z baseline locked at Z=%.2fmm. Capturing initial layer...\n", axis_z);
                     if (!capture_in_progress && !sd_write_in_progress) {
+                      maxConfirmedZ = axis_z;
+                      activeTriggerMode = "smart_z";
+                      Serial.printf("PrusaLink Polling: SMART Z baseline locked at Z=%.2fmm. Capturing initial layer...\n", axis_z);
                       xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
                     }
                   }
@@ -2097,12 +2112,16 @@ void setup() {
                   // Larger step (0.24mm - 0.60mm, e.g. 0.30mm Z-hop vs 0.30mm thick layer): require 6 stable polls (~1.8s) to reject travel Z-hops
                   bool confirmedNormalLayer = (deltaZ >= 0.04f && deltaZ <= 0.24f && zStableCount >= 3);
                   bool confirmedThickLayer  = (deltaZ > 0.24f && deltaZ <= 0.60f && zStableCount >= 6);
+                  // Resynchronization fallback: if intermediate layers were missed (deltaZ > 0.60mm) and Z is stable for >= 6 polls (~1.8s),
+                  // or if Z is stable for >= 10 polls (~3.0s) at any higher Z, this is definitely a valid print layer, NOT a transient travel Z-hop!
+                  bool confirmedResyncLayer = (deltaZ > 0.60f && zStableCount >= 6) || (deltaZ >= 0.04f && zStableCount >= 10);
 
-                  if (confirmedNormalLayer || confirmedThickLayer) {
-                    maxConfirmedZ = axis_z;
-                    activeTriggerMode = "smart_z";
-                    Serial.printf("PrusaLink Polling: SMART Z-TRIGGER (Z=%.2fmm, +%.2fmm, stable=%d) confirmed! Capturing layer...\n", axis_z, deltaZ, zStableCount);
+                  if (confirmedNormalLayer || confirmedThickLayer || confirmedResyncLayer) {
                     if (!capture_in_progress && !sd_write_in_progress) {
+                      maxConfirmedZ = axis_z;
+                      activeTriggerMode = "smart_z";
+                      Serial.printf("PrusaLink Polling: SMART Z-TRIGGER (Z=%.2fmm, +%.2fmm, stable=%d, resync=%d) confirmed! Capturing layer...\n",
+                                    axis_z, deltaZ, zStableCount, confirmedResyncLayer ? 1 : 0);
                       xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
                     }
                   }
