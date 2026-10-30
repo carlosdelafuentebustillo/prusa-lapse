@@ -921,8 +921,10 @@ class MonitorService {
               const camPath = path.join(sessionPath, item.name);
               const files = await fs.readdir(camPath);
               const frameFiles = files.filter(f => f.startsWith('frame_') && f.endsWith('.jpg'));
+              const cameraIndex = parseInt(item.name.replace('camera_', ''), 10);
               cameras.push({
                 name: item.name,
+                cameraIndex: isNaN(cameraIndex) ? cameras.length : cameraIndex,
                 frameCount: frameFiles.length,
               });
             } else if (item.isFile() && item.name.endsWith('.mp4')) {
@@ -936,6 +938,7 @@ class MonitorService {
               } catch (e) {}
             }
           }
+          cameras.sort((a, b) => (a.cameraIndex ?? 0) - (b.cameraIndex ?? 0));
           
           const isOffline = entry.name.startsWith('session_offline_');
           let timestamp = entry.name.replace('session_', '');
@@ -981,7 +984,7 @@ class MonitorService {
       
       // Fetch remote sessions from cameras if explicitly requested or if cache is empty
       if (includeRemote || !this.remoteSessionsCache || this.remoteSessionsCache.length === 0) {
-        this.remoteSessionsCache = [];
+        const newRemoteCache = [];
         const config = await this.getConfig();
         if (config && config.cameraIps) {
           const results = await Promise.all(
@@ -1054,7 +1057,7 @@ class MonitorService {
                       }
                       
                       // Merge remote sessions across DIFFERENT cameras when they represent the same print
-                      const existingRemote = this.remoteSessionsCache.find(s => {
+                      const existingRemote = newRemoteCache.find(s => {
                         if (s.remoteSessionIds && s.remoteSessionIds[ip]) return false; // Never merge two sessions from the same camera!
                         if (data.job_id && s.jobId && data.job_id === s.jobId) return true;
                         if (data.timestamp && s.hasExplicitTimestamp && Math.abs(s.originalDate - targetDate.getTime()) < 120000) return true;
@@ -1074,7 +1077,7 @@ class MonitorService {
                           existingRemote.timestamp = timestamp;
                         }
                       } else {
-                        this.remoteSessionsCache.push({
+                        newRemoteCache.push({
                           id: `remote_${timestamp}_${data.session || lineIdx}`,
                           timestamp: timestamp,
                           hasExplicitTimestamp: Boolean(data.timestamp && data.timestamp.length >= 15),
@@ -1095,15 +1098,20 @@ class MonitorService {
                 }
               }
             }
-          }
+          this.remoteSessionsCache = newRemoteCache;
+        }
 
       // Step B: Reconcile remote sessions with local sessions (runs on EVERY call, even without includeRemote)
       const unmergedRemotes = [];
+      const seenRemoteKeys = new Set();
       if (this.remoteSessionsCache && this.remoteSessionsCache.length > 0) {
         const config = await this.getConfig();
         const cameraIps = config?.cameraIps || [];
 
         for (const remote of this.remoteSessionsCache) {
+          const remoteKey = remote.jobId ? `job_${remote.jobId}` : (remote.timestamp || remote.id);
+          if (seenRemoteKeys.has(remoteKey)) continue;
+          seenRemoteKeys.add(remoteKey);
           const matchingLocal = sessions.find(local => {
             if (local.isRemote) return false;
             if (local.timestamp && remote.timestamp && local.timestamp === remote.timestamp) return true;
