@@ -32,6 +32,40 @@ const parseSessionDate = (timestamp) => {
   };
 };
 
+const generateSessionTimestamp = (date = new Date()) => {
+  return date.getFullYear() +
+    String(date.getMonth() + 1).padStart(2, '0') +
+    String(date.getDate()).padStart(2, '0') + '_' +
+    String(date.getHours()).padStart(2, '0') +
+    String(date.getMinutes()).padStart(2, '0') +
+    String(date.getSeconds()).padStart(2, '0');
+};
+
+const parsePrusaFilenameClient = (displayName = '') => {
+  if (!displayName) return null;
+  const base = displayName.replace(/\.(bgcode|gcode|gco)$/i, '');
+  const nozzleMatch = base.match(/_(\d+(?:\.\d+)?n)(?:_|$)/i);
+  const layerMatch = base.match(/_(\d+(?:\.\d+)?mm)(?:_|$)/i);
+  const materialMatch = base.match(/_(PLA|PETG|ASA|ABS|TPU|FLEX|PC|PVB|PA|HIPS|NYLON|PET|CPE|PP)(?:_|$)/i);
+  const timeMatch = base.match(/_((?:\d+d)?(?:\d+h)?(?:\d+m))$/i);
+
+  let modelName = base;
+  const suffixIdx = modelName.search(/_(?:\d+(?:\.\d+)?n|\d+(?:\.\d+)?mm)_/i);
+  if (suffixIdx > 0) {
+    modelName = modelName.substring(0, suffixIdx);
+  }
+  modelName = modelName.replace(/_/g, ' ').trim();
+
+  return {
+    displayName,
+    modelName: modelName || base,
+    nozzle: nozzleMatch ? nozzleMatch[1] : null,
+    layerHeight: layerMatch ? layerMatch[1] : null,
+    material: materialMatch ? materialMatch[1].toUpperCase() : null,
+    estimatedTime: timeMatch ? timeMatch[1] : null,
+  };
+};
+
 const getSessionDisplayName = (session, dateObj) => {
   if (session?.meta?.modelName) return session.meta.modelName;
   if (session?.jobName) return session.jobName.replace(/\.(bgcode|gcode|gco)$/i, '').replace(/_/g, ' ');
@@ -290,13 +324,16 @@ export default function Home() {
     fetchSessions(true);
   }, []);
 
+  const isAnyPrinting = Object.values(cameraSettings).some(c => c && (c.printer_state === 'PRINTING' || c.printer_state === 'PAUSED'));
+
   useEffect(() => {
     if (!config.cameraIps) return;
+    const intervalTime = isAnyPrinting ? 4000 : 10000;
     const cameraSettingsInterval = setInterval(() => {
       fetchCameraSettings(config.cameraIps);
-    }, 10000);
+    }, intervalTime);
     return () => clearInterval(cameraSettingsInterval);
-  }, [config.cameraIps]);
+  }, [config.cameraIps, isAnyPrinting]);
 
   const fetchSessions = (forceRemote = false) => {
     fetch(`/api/sessions${forceRemote === true ? '?remote=true' : ''}`)
@@ -731,10 +768,66 @@ export default function Home() {
   const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
   // Check if any camera reports an active print
-  const activePrintCamera = Object.values(cameraSettings).find(c => c?.printer_state === 'PRINTING');
+  const activePrintCamera = Object.values(cameraSettings).find(c => c && (c.printer_state === 'PRINTING' || c.printer_state === 'PAUSED'));
   const activePrintName = activePrintCamera?.job_name
     ? activePrintCamera.job_name.replace(/\.(bgcode|gcode|gco)$/i, '').replace(/_/g, ' ')
     : null;
+
+  // Active print session synthesis: if a print is currently active on the printer/cameras, surface it at the top of Timelapse Sessions
+  const activeSession = (activePrintCamera && (activePrintCamera.job_id || activePrintCamera.job_name)) ? (() => {
+    const activeJobId = activePrintCamera.job_id;
+    const activeJobName = activePrintCamera.job_name;
+    const parsed = parsePrusaFilenameClient(activeJobName);
+    const activeCameras = Object.entries(cameraSettings)
+      .filter(([_, c]) => c && (c.sensor_ok || (c.frame_count && c.frame_count > 0) || c.printer_state))
+      .map(([ip, c], idx) => ({
+        name: `camera_${idx}`,
+        displayName: c.camera_name || `Camera ${idx + 1}`,
+        frameCount: c.frame_count || 0,
+        ip
+      }));
+    const totalFramesAcrossCameras = activeCameras.reduce((sum, c) => sum + (c.frameCount || 0), 0);
+    const now = new Date();
+    const activeTimestamp = generateSessionTimestamp(now);
+
+    return {
+      id: `active_job_${activeJobId || 'live'}`,
+      timestamp: activeTimestamp,
+      isActive: true,
+      isRemote: !isMonitoring,
+      jobId: activeJobId,
+      jobName: activeJobName,
+      meta: parsed,
+      printerState: activePrintCamera.printer_state,
+      progress: Math.round(Number(activePrintCamera.job_progress) || 0),
+      cameras: activeCameras,
+      totalFramesLocal: isMonitoring ? frameCount : 0,
+      totalFramesExpected: totalFramesAcrossCameras,
+      videos: []
+    };
+  })() : null;
+
+  const displaySessions = (() => {
+    let list = [...sessions];
+    if (activeSession) {
+      const matchingLocalIdx = list.findIndex(s => !s.isRemote && (
+        (activeSession.jobId && (s.jobId === activeSession.jobId || s.meta?.jobId === activeSession.jobId)) ||
+        (activeSession.jobName && (s.meta?.displayName === activeSession.jobName || s.jobName === activeSession.jobName))
+      ));
+      if (matchingLocalIdx >= 0) {
+        list[matchingLocalIdx] = {
+          ...list[matchingLocalIdx],
+          isActive: true,
+          printerState: activeSession.printerState,
+          progress: activeSession.progress,
+          totalFramesExpected: Math.max(list[matchingLocalIdx].totalFramesExpected || 0, activeSession.totalFramesExpected)
+        };
+      } else {
+        list = [activeSession, ...list];
+      }
+    }
+    return list;
+  })();
 
   const renderSessionCard = (session) => {
     const dateObj = parseSessionDate(session.timestamp);
@@ -804,7 +897,7 @@ export default function Home() {
                   <span style={{ fontSize: '1.02rem', fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {title}
                   </span>
-                  {!session.isRemote && (
+                  {!session.isRemote && !session.isActive && (
                     <button
                       type="button"
                       onClick={() => {
@@ -825,7 +918,12 @@ export default function Home() {
                       {session.meta.material}{session.meta?.layerHeight ? ` · ${session.meta.layerHeight}` : ''}
                     </span>
                   )}
-                  {totalFramesLocal === 0 ? (
+                  {session.isActive ? (
+                    <span style={{ fontSize: '0.68rem', background: 'rgba(250,104,49,0.18)', color: 'var(--color-orange)', border: '1px solid rgba(250,104,49,0.4)', padding: '2px 10px', borderRadius: '12px', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--color-orange)', display: 'inline-block', animation: 'pulse 1.5s ease-in-out infinite' }} />
+                      {isMonitoring ? `Live PC Syncing (${session.progress || 0}%)` : `Recording Live (${session.progress || 0}%)`}
+                    </span>
+                  ) : totalFramesLocal === 0 ? (
                     <span style={{ fontSize: '0.68rem', background: 'rgba(232,83,63,0.15)', color: 'var(--color-danger)', border: '1px solid rgba(232,83,63,0.3)', padding: '1px 8px', borderRadius: '10px', fontWeight: 600 }}>
                       On Camera SD
                     </span>
@@ -842,63 +940,99 @@ export default function Home() {
               )}
 
               <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                <span>{dateObj ? `${dateObj.monthName} ${dateObj.day}, ${dateObj.year} · ${dateObj.time}` : session.timestamp}</span>
+                <span>{session.isActive ? `Printing now · Active Job #${session.jobId || ''}` : (dateObj ? `${dateObj.monthName} ${dateObj.day}, ${dateObj.year} · ${dateObj.time}` : session.timestamp)}</span>
                 <span>•</span>
-                <span>{session.cameras.length} {session.cameras.length === 1 ? 'camera' : 'cameras'} ({totalFramesLocal > 0 ? `${totalFramesLocal} frames local` : `${totalFramesExpected} frames on SD`})</span>
+                <span>{session.cameras.length} {session.cameras.length === 1 ? 'camera' : 'cameras'} ({session.isActive ? `${session.totalFramesExpected} frames on SD` : (totalFramesLocal > 0 ? `${totalFramesLocal} frames local` : `${totalFramesExpected} frames on SD`)})</span>
               </div>
             </div>
           </div>
 
           {/* Right: Delete button */}
-          <button
-            className="btn btn-ghost btn-small"
-            style={{ width: 'auto', padding: '5px 10px', fontSize: '0.75rem', color: 'var(--color-danger)', borderColor: 'rgba(232,83,63,0.25)' }}
-            onClick={() => handleDeleteSession(session.id, title)}
-            title="Delete Session"
-          >
-            Delete
-          </button>
+          {!session.isActive && (
+            <button
+              className="btn btn-ghost btn-small"
+              style={{ width: 'auto', padding: '5px 10px', fontSize: '0.75rem', color: 'var(--color-danger)', borderColor: 'rgba(232,83,63,0.25)' }}
+              onClick={() => handleDeleteSession(session.id, title)}
+              title="Delete Session"
+            >
+              Delete
+            </button>
+          )}
         </div>
 
         {/* Compact Sync & Status Row */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '10px 14px', background: 'rgba(0,0,0,0.22)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.06)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
             {/* Left: Progress details & bar */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1, minWidth: '200px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.76rem' }}>
-                <span style={{ fontWeight: 600, color: displayPercent === 100 ? '#2ecc71' : 'var(--text-primary)' }}>
-                  {isCurrentFetching ? (
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', color: 'var(--color-orange)' }}>
-                      <span className="spinner" style={{ width: '12px', height: '12px' }} />
-                      Syncing frames in progress…
-                    </span>
-                  ) : displayPercent === 100 ? (
-                    '✓ All frames synced locally'
-                  ) : totalFramesLocal > 0 ? (
-                    'Sync incomplete — more frames on SD'
-                  ) : (
-                    'Stored on camera SD card'
-                  )}
-                </span>
-                <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
-                  {displayFetched} / {displayExpected} frames ({displayPercent}%)
-                </span>
+            {session.isActive ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1, minWidth: '200px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.76rem' }}>
+                  <span style={{ fontWeight: 600, color: 'var(--color-orange)', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                    <span className="spinner" style={{ width: '11px', height: '11px' }} />
+                    {isMonitoring ? 'Live PC sync streaming frames in real-time…' : 'Recording timelapse frames to camera SD card…'}
+                  </span>
+                  <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                    {session.progress}% print &middot; {session.totalFramesExpected} frames
+                  </span>
+                </div>
+                <div style={{ width: '100%', height: '5px', background: 'rgba(255,255,255,0.08)', borderRadius: '3px', overflow: 'hidden' }}>
+                  <div
+                    style={{
+                      width: `${Math.max(2, session.progress || 0)}%`,
+                      height: '100%',
+                      background: 'linear-gradient(90deg, var(--color-orange), #ff9f43)',
+                      transition: 'width 0.4s ease'
+                    }}
+                  />
+                </div>
               </div>
-              <div style={{ width: '100%', height: '5px', background: 'rgba(255,255,255,0.08)', borderRadius: '3px', overflow: 'hidden' }}>
-                <div
-                  style={{
-                    width: `${displayPercent}%`,
-                    height: '100%',
-                    background: displayPercent === 100 ? '#2ecc71' : 'linear-gradient(90deg, var(--color-orange), #ff9f43)',
-                    transition: 'width 0.3s ease'
-                  }}
-                />
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1, minWidth: '200px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.76rem' }}>
+                  <span style={{ fontWeight: 600, color: displayPercent === 100 ? '#2ecc71' : 'var(--text-primary)' }}>
+                    {isCurrentFetching ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', color: 'var(--color-orange)' }}>
+                        <span className="spinner" style={{ width: '12px', height: '12px' }} />
+                        Syncing frames in progress…
+                      </span>
+                    ) : displayPercent === 100 ? (
+                      '✓ All frames synced locally'
+                    ) : totalFramesLocal > 0 ? (
+                      'Sync incomplete — more frames on SD'
+                    ) : (
+                      'Stored on camera SD card'
+                    )}
+                  </span>
+                  <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                    {displayFetched} / {displayExpected} frames ({displayPercent}%)
+                  </span>
+                </div>
+                <div style={{ width: '100%', height: '5px', background: 'rgba(255,255,255,0.08)', borderRadius: '3px', overflow: 'hidden' }}>
+                  <div
+                    style={{
+                      width: `${displayPercent}%`,
+                      height: '100%',
+                      background: displayPercent === 100 ? '#2ecc71' : 'linear-gradient(90deg, var(--color-orange), #ff9f43)',
+                      transition: 'width 0.3s ease'
+                    }}
+                  />
+                </div>
               </div>
-            </div>
+            )}
 
-            {/* Right: Compact Sync/Resume Button (Styled like Re-compile / Compile MP4) */}
+            {/* Right: Button */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              {displayPercent < 100 ? (
+              {session.isActive ? (
+                <button
+                  className={`btn btn-small ${isMonitoring ? 'btn-danger' : 'btn-ghost'}`}
+                  style={{ width: 'auto', padding: '5px 12px', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                  onClick={toggleMonitoring}
+                  disabled={isTesting}
+                  title={isMonitoring ? "Stop streaming frames to PC" : "Stream frames directly from cameras to PC in real-time"}
+                >
+                  {isMonitoring ? `Stop Live Sync (${frameCount})` : 'Start Live PC Sync'}
+                </button>
+              ) : displayPercent < 100 ? (
                 <button
                   className={`btn btn-small ${totalFramesLocal > 0 ? 'btn-secondary' : 'btn-primary'}`}
                   style={{ width: 'auto', padding: '5px 12px', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
@@ -929,8 +1063,22 @@ export default function Home() {
             </div>
           </div>
 
+          {/* Sub-status: Active camera frame counts for active print */}
+          {session.isActive && session.cameras && session.cameras.length > 0 && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '14px', flexWrap: 'wrap', paddingTop: '6px', borderTop: '1px solid rgba(255,255,255,0.05)', fontSize: '0.72rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+              <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
+                {session.cameras.map((c, idx) => (
+                  <span key={idx}>
+                    {c.displayName}: {c.frameCount} frames
+                  </span>
+                ))}
+              </div>
+              <span style={{ color: 'var(--text-secondary)', opacity: 0.8 }}>Ready to sync once print finishes</span>
+            </div>
+          )}
+
           {/* Sub-status: Active multi-camera sync progress details */}
-          {isCurrentFetching && fetchStatus?.cameras && fetchStatus.cameras.length > 1 && (
+          {!session.isActive && isCurrentFetching && fetchStatus?.cameras && fetchStatus.cameras.length > 1 && (
             <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', paddingTop: '6px', borderTop: '1px solid rgba(255,255,255,0.05)', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
               {fetchStatus.cameras.map((c, idx) => (
                 <span key={idx} style={{ opacity: c.status === 'done' ? 0.8 : 1, color: c.status === 'error' ? '#ff6b6b' : 'inherit' }}>
@@ -1013,6 +1161,10 @@ export default function Home() {
                 </div>
               );
             })}
+          </div>
+        ) : session.isActive ? (
+          <div style={{ padding: '10px 14px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.8rem', background: 'rgba(255,255,255,0.015)', borderRadius: '6px', border: '1px dashed rgba(255,255,255,0.06)' }}>
+            Print is actively recording. Frames are accumulating on camera micro-SD storage. Full session sync &amp; video compilation will be available once the print completes.
           </div>
         ) : (
           <div style={{ padding: '10px 14px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.8rem', background: 'rgba(255,255,255,0.015)', borderRadius: '6px', border: '1px dashed rgba(255,255,255,0.06)' }}>
@@ -1108,7 +1260,7 @@ export default function Home() {
               </svg>
               Timelapse Sessions
               <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontWeight: 400 }}>
-                ({sessions.length})
+                ({displaySessions.length})
               </span>
             </span>
 
@@ -1141,7 +1293,7 @@ export default function Home() {
                 Check Camera SD
               </button>
 
-              {sessions.length > 0 && (
+              {displaySessions.length > 0 && (
                 <button
                   className="btn btn-ghost btn-small"
                   onClick={handleClearAllSessions}
@@ -1181,19 +1333,19 @@ export default function Home() {
             </div>
           )}
 
-          {sessions.length === 0 ? (
+          {displaySessions.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
               No timelapse sessions yet. Start a print on your Prusa printer or click <strong>Check Camera SD</strong> to sync finished prints.
             </div>
           ) : viewMode === 'list' ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {sessions.map(session => renderSessionCard(session))}
+              {displaySessions.map(session => renderSessionCard(session))}
             </div>
           ) : (
             <>
-              {selectedSessionId && sessions.find(s => s.id === selectedSessionId) && (
+              {selectedSessionId && displaySessions.find(s => s.id === selectedSessionId) && (
                 <div style={{ marginBottom: '16px' }}>
-                  {renderSessionCard(sessions.find(s => s.id === selectedSessionId))}
+                  {renderSessionCard(displaySessions.find(s => s.id === selectedSessionId))}
                 </div>
               )}
 
@@ -1208,7 +1360,7 @@ export default function Home() {
                   <div key={d} className="calendar-day-header">{d}</div>
                 ))}
                 {calendarDays.map((cDay, i) => {
-                  const daySessions = cDay.dateStr ? sessions.filter(s => {
+                  const daySessions = cDay.dateStr ? displaySessions.filter(s => {
                     const dObj = parseSessionDate(s.timestamp);
                     return dObj && dObj.dateStr === cDay.dateStr;
                   }) : [];
