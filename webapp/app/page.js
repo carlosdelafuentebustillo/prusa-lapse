@@ -360,7 +360,11 @@ export default function Home() {
 
           const deduped = data.sessions.filter(s => {
             if (!s.isRemote) return true;
-            if (fetchStatus?.isFetching && (fetchStatus.remoteSessionId === s.id || fetchStatus.sessionTimestamp === s.timestamp)) {
+            if (fetchStatus?.isFetching && (
+              fetchStatus.remoteSessionId === s.id ||
+              fetchStatus.sessionTimestamp === s.timestamp ||
+              (s.jobId && fetchStatus.jobId === s.jobId)
+            )) {
               return false;
             }
             if (s.timestamp && localTimestamps.has(s.timestamp)) return false;
@@ -838,12 +842,18 @@ export default function Home() {
     const totalFramesExpected = session.totalFramesExpected ?? (session.remoteFrameCounts ? Object.values(session.remoteFrameCounts).reduce((a, b) => a + (Number(b) || 0), 0) : totalFramesLocal);
     const syncPercent = session.syncPercentage ?? (totalFramesExpected > 0 ? Math.min(100, Math.round((totalFramesLocal / totalFramesExpected) * 100)) : (session.isSynced ? 100 : 0));
 
-    const isCurrentFetching = (fetchingSessionId === session.id) ||
-      (fetchStatus?.isFetching && (
-        fetchStatus?.remoteSessionId === session.id ||
-        fetchStatus?.sessionId === session.id ||
-        (session.remoteSessionIds && Object.values(session.remoteSessionIds).some(sid => fetchStatus?.remoteSessionId?.includes(sid)))
-      ));
+    const hasJobConflict = session.jobId && fetchStatus?.jobId && session.jobId !== fetchStatus.jobId;
+    const isCurrentFetching = Boolean(
+      !session.isActive && !hasJobConflict && (
+        (fetchingSessionId && fetchingSessionId === session.id) ||
+        (fetchStatus?.isFetching && (
+          fetchStatus.remoteSessionId === session.id ||
+          fetchStatus.sessionId === session.id ||
+          (fetchStatus.sessionTimestamp && session.timestamp && session.timestamp === fetchStatus.sessionTimestamp) ||
+          (fetchStatus.jobId && (session.jobId === fetchStatus.jobId || session.meta?.jobId === fetchStatus.jobId))
+        ))
+      )
+    );
 
     const displayPercent = isCurrentFetching ? (fetchStatus?.overallProgress ?? fetchStatus?.progress ?? syncPercent) : syncPercent;
     const displayFetched = isCurrentFetching ? (fetchStatus?.totalFramesFetched ?? totalFramesLocal) : totalFramesLocal;
