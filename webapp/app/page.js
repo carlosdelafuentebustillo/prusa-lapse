@@ -62,6 +62,156 @@ function CalendarSessionPill({ session, title, time, isSelected, onClick }) {
   );
 }
 
+function CalendarDayCell({ cDay, isToday, daySessions, selectedSessionId, setSelectedSessionId, getSessionDisplayName }) {
+  const listRef = useRef(null);
+  const rafRef = useRef(null);
+  const scrollDirRef = useRef(0);
+  const [canScrollUp, setCanScrollUp] = useState(false);
+  const [canScrollDown, setCanScrollDown] = useState(false);
+
+  const updateScrollState = useCallback(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const up = el.scrollTop > 2;
+    const down = el.scrollHeight - el.scrollTop - el.clientHeight > 2;
+    setCanScrollUp(up);
+    setCanScrollDown(down);
+  }, []);
+
+  useEffect(() => {
+    updateScrollState();
+  }, [daySessions.length, updateScrollState]);
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    updateScrollState();
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateScrollState) : null;
+    if (ro) ro.observe(el);
+    window.addEventListener('resize', updateScrollState);
+    return () => {
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', updateScrollState);
+    };
+  }, [updateScrollState]);
+
+  const stopHoverScroll = useCallback(() => {
+    scrollDirRef.current = 0;
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+  }, []);
+
+  const startHoverScroll = useCallback((direction) => {
+    stopHoverScroll();
+    if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      return;
+    }
+    const startEl = listRef.current;
+    if (!startEl) return;
+
+    scrollDirRef.current = direction;
+    let lastTime = performance.now();
+    let virtualScrollTop = startEl.scrollTop;
+
+    const step = (now) => {
+      const el = listRef.current;
+      if (!el || scrollDirRef.current === 0) return;
+      const dt = Math.min(50, now - lastTime);
+      lastTime = now;
+
+      const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+      virtualScrollTop = Math.max(0, Math.min(maxScroll, virtualScrollTop + scrollDirRef.current * (dt * 0.065)));
+      el.scrollTop = virtualScrollTop;
+      updateScrollState();
+
+      const stillCanScroll = scrollDirRef.current > 0
+        ? (maxScroll - virtualScrollTop > 1)
+        : (virtualScrollTop > 1);
+
+      if (stillCanScroll) {
+        rafRef.current = requestAnimationFrame(step);
+      } else {
+        stopHoverScroll();
+      }
+    };
+
+    rafRef.current = requestAnimationFrame(step);
+  }, [stopHoverScroll, updateScrollState]);
+
+  useEffect(() => {
+    return () => stopHoverScroll();
+  }, [stopHoverScroll]);
+
+  const handleStepScroll = (e, direction) => {
+    e.stopPropagation();
+    const el = listRef.current;
+    if (!el) return;
+    el.scrollBy({ top: direction * 26, behavior: 'smooth' });
+    setTimeout(updateScrollState, 220);
+  };
+
+  return (
+    <div
+      className={`calendar-cell ${cDay.isOtherMonth ? 'other-month' : ''} ${isToday ? 'today' : ''}`}
+      onMouseLeave={stopHoverScroll}
+    >
+      <div className="calendar-date-number">{cDay.day}</div>
+      <div className="calendar-sessions-wrapper">
+        <div
+          className={`calendar-scroll-zone top ${canScrollUp ? 'visible' : ''}`}
+          onMouseEnter={() => startHoverScroll(-1)}
+          onMouseLeave={stopHoverScroll}
+          onClick={(e) => handleStepScroll(e, -1)}
+          title="Hover or click to scroll up"
+        >
+          <span className="calendar-scroll-arrow" aria-hidden="true">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="18 15 12 9 6 15" />
+            </svg>
+          </span>
+        </div>
+
+        <div
+          ref={listRef}
+          className="calendar-sessions-list"
+          onScroll={updateScrollState}
+        >
+          {daySessions.map(sess => {
+            const sObj = parseSessionDate(sess.timestamp);
+            const pillTitle = getSessionDisplayName(sess, sObj);
+            return (
+              <CalendarSessionPill
+                key={sess.id}
+                session={sess}
+                title={pillTitle}
+                time={sObj?.time}
+                isSelected={selectedSessionId === sess.id}
+                onClick={() => setSelectedSessionId(prev => prev === sess.id ? null : sess.id)}
+              />
+            );
+          })}
+        </div>
+
+        <div
+          className={`calendar-scroll-zone bottom ${canScrollDown ? 'visible' : ''}`}
+          onMouseEnter={() => startHoverScroll(1)}
+          onMouseLeave={stopHoverScroll}
+          onClick={(e) => handleStepScroll(e, 1)}
+          title="Hover or click to scroll down"
+        >
+          <span className="calendar-scroll-arrow" aria-hidden="true">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const parseSessionDate = (timestamp) => {
   if (!timestamp || timestamp.length < 15) return null;
   const year = parseInt(timestamp.substring(0, 4), 10);
@@ -1409,25 +1559,15 @@ export default function Home() {
                   const isToday = cDay.dateStr === todayDateStr;
 
                   return (
-                    <div key={i} className={`calendar-cell ${cDay.isOtherMonth ? 'other-month' : ''} ${isToday ? 'today' : ''}`}>
-                      <div className="calendar-date-number">{cDay.day}</div>
-                      <div className="calendar-sessions-list">
-                        {daySessions.map(sess => {
-                          const sObj = parseSessionDate(sess.timestamp);
-                          const pillTitle = getSessionDisplayName(sess, sObj);
-                          return (
-                            <CalendarSessionPill
-                              key={sess.id}
-                              session={sess}
-                              title={pillTitle}
-                              time={sObj?.time}
-                              isSelected={selectedSessionId === sess.id}
-                              onClick={() => setSelectedSessionId(prev => prev === sess.id ? null : sess.id)}
-                            />
-                          );
-                        })}
-                      </div>
-                    </div>
+                    <CalendarDayCell
+                      key={i}
+                      cDay={cDay}
+                      isToday={isToday}
+                      daySessions={daySessions}
+                      selectedSessionId={selectedSessionId}
+                      setSelectedSessionId={setSelectedSessionId}
+                      getSessionDisplayName={getSessionDisplayName}
+                    />
                   );
                 })}
               </div>
