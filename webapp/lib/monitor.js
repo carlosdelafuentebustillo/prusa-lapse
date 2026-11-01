@@ -863,6 +863,9 @@ class MonitorService {
     this.log('Wiping SD cards on all cameras...', 'warning');
     this.remoteSessionsCache = [];
     this.fetchStatus = null;
+    try {
+      await fs.unlink(path.join(CAPTURES_DIR, 'remote_sessions_cache.json'));
+    } catch (e) {}
     let hasError = false;
     let errors = [];
     
@@ -983,26 +986,71 @@ class MonitorService {
       }
       
       // Fetch remote sessions from cameras if explicitly requested or if cache is empty
+      const remoteCacheFile = path.join(CAPTURES_DIR, 'remote_sessions_cache.json');
       if (includeRemote || !this.remoteSessionsCache || this.remoteSessionsCache.length === 0) {
         const newRemoteCache = [];
         const config = await this.getConfig();
+        let persistedByIp = {};
+        try {
+          if (existsSync(remoteCacheFile)) {
+            persistedByIp = JSON.parse(await fs.readFile(remoteCacheFile, 'utf-8')) || {};
+          }
+        } catch (e) {
+          persistedByIp = {};
+        }
+
         if (config && config.cameraIps) {
+          let cacheUpdated = false;
           const results = await Promise.all(
             config.cameraIps.map(async (ip) => {
+              let jsonlText = null;
               try {
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 2500);
+                const timeoutId = setTimeout(() => controller.abort(), 6000);
                 const res = await fetch(`http://${ip}/download_sd?file=sessions.jsonl`, {
                   signal: controller.signal
                 });
                 clearTimeout(timeoutId);
                 if (res.ok) {
-                  return { ip, text: await res.text() };
+                  jsonlText = await res.text();
                 }
               } catch (e) {}
-              return { ip, text: null };
+
+              if (jsonlText !== null) {
+                persistedByIp[ip] = jsonlText;
+                cacheUpdated = true;
+                return { ip, text: jsonlText };
+              }
+              return { ip, text: persistedByIp[ip] || null };
             })
           );
+
+          if (cacheUpdated) {
+            try {
+              await fs.writeFile(remoteCacheFile, JSON.stringify(persistedByIp, null, 2), 'utf-8');
+            } catch (e) {}
+          }
+
+          let usbPrintFiles = null;
+          const getUsbPrintFiles = async () => {
+            if (usbPrintFiles !== null) return usbPrintFiles;
+            usbPrintFiles = [];
+            if (config && config.prusaIp) {
+              try {
+                const headers = {};
+                if (config.prusaApiKey) headers['X-Api-Key'] = config.prusaApiKey;
+                const ctrl = new AbortController();
+                const tid = setTimeout(() => ctrl.abort(), 2500);
+                const fRes = await fetch(`http://${config.prusaIp}/api/v1/files/usb`, { headers, signal: ctrl.signal });
+                clearTimeout(tid);
+                if (fRes.ok) {
+                  const usbData = await fRes.json();
+                  usbPrintFiles = (usbData.children || []).filter(c => c.type === 'PRINT_FILE');
+                }
+              } catch (e) {}
+            }
+            return usbPrintFiles;
+          };
 
           for (const item of results) {
             const { ip, text } = item;
@@ -1031,11 +1079,15 @@ class MonitorService {
                       }
 
                       if (!targetDate) {
-                        const sessNum = parseInt(String(data.session || '').replace(/\D+/g, ''), 10) || (lineIdx + 1);
-                        const existingLocal = sessions.find(s =>
-                          (data.job_id && s.meta?.jobId === data.job_id) ||
-                          (data.job_name && (s.meta?.displayName === data.job_name || s.meta?.modelName === parsePrusaFilename(data.job_name)?.modelName))
-                        );
+                        const existingLocal = sessions.find(s => {
+                          const localJobId = s.jobId || s.meta?.jobId;
+                          if (data.job_id && localJobId) return data.job_id === localJobId;
+                          if (data.job_id && !localJobId) return false;
+                          if (data.job_name) {
+                            return s.meta?.displayName === data.job_name || s.meta?.modelName === parsePrusaFilename(data.job_name)?.modelName;
+                          }
+                          return false;
+                        });
                         if (existingLocal && existingLocal.timestamp && existingLocal.timestamp.length >= 15) {
                           timestamp = existingLocal.timestamp;
                           try {
@@ -1047,11 +1099,23 @@ class MonitorService {
                             const sec = parseInt(timestamp.substring(13, 15), 10);
                             targetDate = new Date(year, month, day, hour, min, sec);
                           } catch (e) {
-                            targetDate = new Date();
+                            targetDate = null;
                           }
-                        } else {
-                          const baseEpoch = 1793000000000 + (data.job_id || sessNum) * 3600000 + sessNum * 1000;
-                          targetDate = new Date(baseEpoch);
+                        }
+                        if (!targetDate && data.job_name) {
+                          const pFiles = await getUsbPrintFiles();
+                          const cleanTarget = data.job_name.toLowerCase();
+                          const matchedUsb = pFiles.find(f =>
+                            (f.display_name && f.display_name.toLowerCase() === cleanTarget) ||
+                            (f.name && f.name.toLowerCase() === cleanTarget)
+                          );
+                          if (matchedUsb && matchedUsb.m_timestamp) {
+                            targetDate = new Date(matchedUsb.m_timestamp * 1000);
+                            timestamp = generateSessionTimestamp(targetDate);
+                          }
+                        }
+                        if (!targetDate) {
+                          targetDate = new Date();
                           timestamp = generateSessionTimestamp(targetDate);
                         }
                       }

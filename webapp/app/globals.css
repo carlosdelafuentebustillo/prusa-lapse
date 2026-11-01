@@ -567,6 +567,9 @@ body {
 
 .calendar-cell.other-month {
   background: var(--bg-surface);
+}
+
+.calendar-cell.other-month .calendar-date-number {
   opacity: 0.45;
 }
 
