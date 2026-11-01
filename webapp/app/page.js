@@ -960,11 +960,14 @@ export default function Home() {
     const daysInMonth = getDaysInMonth(currentMonthDate.year, currentMonthDate.month);
     const firstDay = getFirstDayOfMonth(currentMonthDate.year, currentMonthDate.month);
     const prevMonthDate = currentMonthDate.month === 1 ? { month: 12, year: currentMonthDate.year - 1 } : { month: currentMonthDate.month - 1, year: currentMonthDate.year };
+    const nextMonthDate = currentMonthDate.month === 12 ? { month: 1, year: currentMonthDate.year + 1 } : { month: currentMonthDate.month + 1, year: currentMonthDate.year };
     const prevMonthDays = getDaysInMonth(prevMonthDate.year, prevMonthDate.month);
 
     const days = [];
     for (let i = firstDay - 1; i >= 0; i--) {
-      days.push({ day: prevMonthDays - i, isOtherMonth: true });
+      const d = prevMonthDays - i;
+      const dateStr = `${prevMonthDate.year}-${String(prevMonthDate.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      days.push({ day: d, isOtherMonth: true, dateStr });
     }
     for (let i = 1; i <= daysInMonth; i++) {
       const dateStr = `${currentMonthDate.year}-${String(currentMonthDate.month).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
@@ -972,7 +975,8 @@ export default function Home() {
     }
     const remainingCells = 42 - days.length;
     for (let i = 1; i <= remainingCells; i++) {
-      days.push({ day: i, isOtherMonth: true });
+      const dateStr = `${nextMonthDate.year}-${String(nextMonthDate.month).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
+      days.push({ day: i, isOtherMonth: true, dateStr });
     }
     return days;
   };
