@@ -547,16 +547,32 @@ export default function Home() {
       .then(res => res.json())
       .then(data => {
         if (data.sessions) {
-          // Client-side deduplication safeguard: if a local session exists for a specific print, never render a duplicate remote card
+          // Client-side deduplication safeguard: if a local session exists for a specific print, never render a duplicate remote card.
+          // A shared job ID only counts when the start times agree: two recordings of the same job that started far apart
+          // are different timelapses and must each keep their own card.
+          const tsToMs = (ts) => {
+            const p = parseSessionDate(ts);
+            return p ? new Date(p.year, p.month - 1, p.day, p.hour, p.min, p.sec).getTime() : null;
+          };
+          const sameStart = (a, b) => {
+            const x = tsToMs(a);
+            const y = tsToMs(b);
+            return x === null || y === null || Math.abs(x - y) <= 10 * 60 * 1000;
+          };
           const localTimestamps = new Set();
-          const localJobIds = new Set();
+          const localStartsByJobId = new Map();
           const localRemoteIdsByIp = new Map();
+          const addLocalJob = (jobId, ts) => {
+            if (!jobId) return;
+            if (!localStartsByJobId.has(jobId)) localStartsByJobId.set(jobId, []);
+            localStartsByJobId.get(jobId).push(ts);
+          };
 
           data.sessions.forEach(s => {
             if (!s.isRemote) {
               if (s.timestamp) localTimestamps.add(s.timestamp);
-              if (s.meta?.jobId) localJobIds.add(s.meta.jobId);
-              if (s.jobId) localJobIds.add(s.jobId);
+              addLocalJob(s.meta?.jobId, s.timestamp);
+              if (s.jobId && s.jobId !== s.meta?.jobId) addLocalJob(s.jobId, s.timestamp);
               if (s.remoteSessionIds) {
                 Object.entries(s.remoteSessionIds).forEach(([ip, sid]) => {
                   localRemoteIdsByIp.set(`${ip}:${sid}`, true);
@@ -570,12 +586,12 @@ export default function Home() {
             if (fetchStatus?.isFetching && (
               fetchStatus.remoteSessionId === s.id ||
               fetchStatus.sessionTimestamp === s.timestamp ||
-              (s.jobId && fetchStatus.jobId === s.jobId)
+              (s.jobId && fetchStatus.jobId === s.jobId && sameStart(fetchStatus.sessionTimestamp, s.timestamp))
             )) {
               return false;
             }
             if (s.timestamp && localTimestamps.has(s.timestamp)) return false;
-            if (s.jobId && localJobIds.has(s.jobId)) return false;
+            if (s.jobId && (localStartsByJobId.get(s.jobId) || []).some(ts => sameStart(ts, s.timestamp))) return false;
             if (s.remoteSessionIds && Object.entries(s.remoteSessionIds).some(([ip, sid]) => localRemoteIdsByIp.has(`${ip}:${sid}`))) {
               return false;
             }

@@ -22,7 +22,7 @@ int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 11
-#define FIRMWARE_VERSION "v1.2.8"
+#define FIRMWARE_VERSION "v1.2.9"
 
 bool offlineMode = false;
 bool sdCardAvailable = false;
@@ -1003,6 +1003,174 @@ void IRAM_ATTR gpioTriggerISR() {
   }
 }
 
+// ==========================================
+// JOB-AWARE OFFLINE SESSION LIFECYCLE
+// ==========================================
+// The identity of the currently open session (which print it belongs to) is persisted in NVS.
+// This lets a reboot in the middle of a print safely resume that session, while guaranteeing a
+// DIFFERENT print can never inherit the frames of an unfinished one.
+bool offlineSessionOpen = false;
+
+void persistOpenSession(bool open) {
+  preferences.begin("prusalapse", false);
+  preferences.putBool("aOpen", open);
+  if (open) {
+    preferences.putInt("aSess", sessionId);
+    preferences.putInt("aJob", currentJobId);
+    preferences.putString("aName", currentJobName);
+    preferences.putString("aTs", sessionStartTimestamp);
+  }
+  preferences.end();
+}
+
+// Appends one finished session to /lapse/sessions.jsonl and starts packing it into a .tar
+void appendSessionRecord(int sess, int frames, String ts, int jobId, String jobName) {
+  if (!sdCardAvailable || frames <= 0) return;
+
+  if (ts == "") {
+    time_t now = time(nullptr);
+    if (now > 1000000) {
+      struct tm timeinfo;
+      gmtime_r(&now, &timeinfo);
+      char buf[20];
+      snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d",
+               timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+               timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+      ts = String(buf);
+    }
+  }
+
+  if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
+  File jsonFile = SD_MMC.open("/lapse/sessions.jsonl", FILE_APPEND);
+  if (jsonFile) {
+    if (ts != "") {
+      jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"timestamp\":\"%s\",\"job_id\":%d,\"job_name\":\"%s\"}\n", sess, frames, ts.c_str(), jobId, jobName.c_str());
+    } else {
+      jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"job_id\":%d,\"job_name\":\"%s\"}\n", sess, frames, jobId, jobName.c_str());
+    }
+    jsonFile.close();
+    if (sd_mutex) xSemaphoreGive(sd_mutex);
+    Serial.printf("Updated sessions.jsonl (s%04d, %d frames, job %d)\n", sess, frames, jobId);
+    // Launch background TAR packing task with 8192-byte stack
+    xTaskCreate(packTarTask, "packTarTask", 8192, (void*)(intptr_t)sess, 1, NULL);
+  } else {
+    if (sd_mutex) xSemaphoreGive(sd_mutex);
+  }
+}
+
+// Closes the session that is currently being recorded under the print it actually belongs to
+void finalizeOpenSession() {
+  if (offlineMode) {
+    appendSessionRecord(sessionId, offlineFrameCount, sessionStartTimestamp, currentJobId, currentJobName);
+  }
+  offlineSessionOpen = false;
+  persistOpenSession(false);
+}
+
+// Opens the session for the print that just started (or resumes it after a reboot of the SAME print)
+void beginOfflineSession() {
+  bool resumeExistingSession = false;
+  int existingFrames = 0;
+  String resumedTimestamp = "";
+
+  if (sdCardAvailable && sessionId > 0) {
+    char curSessTag[24];
+    snprintf(curSessTag, sizeof(curSessTag), "\"session\":\"s%04d\"", sessionId);
+    char curPrefix[16];
+    snprintf(curPrefix, sizeof(curPrefix), "s%04d_f", sessionId);
+
+    bool finalizedInJsonl = false;
+    if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
+    File jf = SD_MMC.open("/lapse/sessions.jsonl", FILE_READ);
+    if (jf) {
+      while (jf.available()) {
+        String line = jf.readStringUntil('\n');
+        if (line.indexOf(curSessTag) != -1) {
+          finalizedInJsonl = true;
+          break;
+        }
+      }
+      jf.close();
+    }
+    if (!finalizedInJsonl) {
+      File dir = SD_MMC.open("/lapse");
+      if (dir) {
+        bool isDir = false;
+        String fn = dir.getNextFileName(&isDir);
+        while (fn.length() > 0) {
+          int ls = fn.lastIndexOf('/');
+          if (ls != -1) fn = fn.substring(ls + 1);
+          if (!isDir && fn.startsWith(curPrefix) && fn.endsWith(".jpg")) {
+            existingFrames++;
+          }
+          fn = dir.getNextFileName(&isDir);
+        }
+        dir.close();
+      }
+    }
+    if (sd_mutex) xSemaphoreGive(sd_mutex);
+
+    if (!finalizedInJsonl) {
+      // An earlier session was never closed (reboot, brownout, Wi-Fi drop...). Which print did it belong to?
+      preferences.begin("prusalapse", true);
+      bool aOpen = preferences.getBool("aOpen", false);
+      int aSess = preferences.getInt("aSess", 0);
+      int aJob = preferences.getInt("aJob", -1);
+      String aName = preferences.getString("aName", "");
+      String aTs = preferences.getString("aTs", "");
+      preferences.end();
+
+      bool haveMeta = aOpen && aSess == sessionId;
+      bool sameJob = haveMeta && aJob > 0 && currentJobId > 0 && aJob == currentJobId;
+
+      if (sameJob) {
+        // Same print, the camera just restarted mid-print: keep recording into the same timelapse
+        resumeExistingSession = true;
+        resumedTimestamp = aTs;
+      } else if (existingFrames > 0) {
+        // Different (or unknown) print: close the orphan under ITS OWN job info so frames never mix
+        Serial.printf("Closing orphan session s%04d (%d frames, job %d) before starting job %d\n", sessionId, existingFrames, haveMeta ? aJob : -1, currentJobId);
+        appendSessionRecord(sessionId, existingFrames, haveMeta ? aTs : String(""), haveMeta ? aJob : -1, haveMeta ? aName : String(""));
+      } else {
+        // Empty leftover session: safe to simply reuse its number
+        resumeExistingSession = true;
+      }
+    }
+  }
+
+  if (resumeExistingSession) {
+    offlineFrameCount = existingFrames;
+    Serial.printf("Resuming offline session s%04d at frame %d (job %d)\n", sessionId, offlineFrameCount, currentJobId);
+  } else {
+    sessionId++;
+    preferences.begin("prusalapse", false);
+    preferences.putInt("sessionId", sessionId);
+    preferences.end();
+    offlineFrameCount = 0;
+  }
+
+  if (resumedTimestamp != "") {
+    sessionStartTimestamp = resumedTimestamp; // keep the ORIGINAL start time of this print
+  } else {
+    time_t now = time(nullptr);
+    if (now > 1000000) {
+      struct tm timeinfo;
+      gmtime_r(&now, &timeinfo);
+      char buf[20];
+      snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d",
+               timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+               timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+      sessionStartTimestamp = String(buf);
+    } else {
+      sessionStartTimestamp = "";
+    }
+  }
+
+  offlineSessionOpen = true;
+  persistOpenSession(true);
+  Serial.printf("Active offline session s%04d (job %d, startFrame %d) at %s\n", sessionId, currentJobId, offlineFrameCount, sessionStartTimestamp.c_str());
+}
+
 void setupWebServer() {
   // --- REST API ENDPOINTS --- //
 
@@ -1872,8 +2040,21 @@ void setup() {
 
           static bool printSessionActive = false;
 
-          // Detect job change or new print session start
-          if (jobId > 0 && currentJobId > 0 && jobId != currentJobId) {
+          // Detect a job change. If the printer moved straight from one print to the next without us ever
+          // seeing it leave PRINTING, the old session must be closed under the OLD job before a new one opens.
+          bool jobRollover = (jobId > 0 && currentJobId > 0 && jobId != currentJobId);
+          if (jobRollover && printSessionActive && offlineMode && (capture_in_progress || sd_write_in_progress)) {
+            // Let the in-flight frame land in the OLD session first
+            http.end();
+            vTaskDelay(pdMS_TO_TICKS(150));
+            continue;
+          }
+          if (jobRollover) {
+            if (printSessionActive && offlineMode) {
+              Serial.printf("Job changed %d -> %d without leaving PRINTING. Closing session s%04d.\n", currentJobId, jobId, sessionId);
+              finalizeOpenSession();
+              printSessionActive = false;
+            }
             maxConfirmedZ = -1.0;
             prevPollZ = -1.0;
             zStableCount = 0;
@@ -1882,7 +2063,9 @@ void setup() {
             currentJobName = "";
           }
           if (jobId > 0) {
+            bool idChanged = (currentJobId != jobId);
             currentJobId = jobId;
+            if (idChanged && offlineSessionOpen) persistOpenSession(true);
           }
 
           // Fetch print filename once per active job from /api/v1/job
@@ -1923,6 +2106,7 @@ void setup() {
               if (extracted.length() > 0) {
                 currentJobName = extracted;
                 Serial.printf("Detected active print job name: %s\n", currentJobName.c_str());
+                if (offlineSessionOpen) persistOpenSession(true);
               }
             }
             jobHttp.end();
@@ -1939,117 +2123,14 @@ void setup() {
               activeTriggerMode = "auto";
 
               if (offlineMode) {
-                // Check if current sessionId on SD card was left open (unfinalized in sessions.jsonl) due to a mid-print reboot
-                bool resumeExistingSession = false;
-                int existingFrames = 0;
-                if (sdCardAvailable && sessionId > 0) {
-                  char curSessTag[24];
-                  snprintf(curSessTag, sizeof(curSessTag), "\"session\":\"s%04d\"", sessionId);
-                  char curPrefix[16];
-                  snprintf(curPrefix, sizeof(curPrefix), "s%04d_f", sessionId);
-
-                  if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
-                  bool finalizedInJsonl = false;
-                  File jf = SD_MMC.open("/lapse/sessions.jsonl", FILE_READ);
-                  if (jf) {
-                    while (jf.available()) {
-                      String line = jf.readStringUntil('\n');
-                      if (line.indexOf(curSessTag) != -1) {
-                        finalizedInJsonl = true;
-                        break;
-                      }
-                    }
-                    jf.close();
-                  }
-
-                  if (!finalizedInJsonl) {
-                    resumeExistingSession = true;
-                    File dir = SD_MMC.open("/lapse");
-                    if (dir) {
-                      bool isDir = false;
-                      String fn = dir.getNextFileName(&isDir);
-                      while (fn.length() > 0) {
-                        int ls = fn.lastIndexOf('/');
-                        if (ls != -1) fn = fn.substring(ls + 1);
-                        if (!isDir && fn.startsWith(curPrefix) && fn.endsWith(".jpg")) {
-                          existingFrames++;
-                        }
-                        fn = dir.getNextFileName(&isDir);
-                      }
-                      dir.close();
-                    }
-                  }
-                  if (sd_mutex) xSemaphoreGive(sd_mutex);
-                }
-
-                if (resumeExistingSession) {
-                  offlineFrameCount = existingFrames;
-                  Serial.printf("Resuming unfinalized offline session s%04d at frame %d (job %d)\n", sessionId, offlineFrameCount, currentJobId);
-                } else {
-                  sessionId++;
-                  preferences.begin("prusalapse", false);
-                  preferences.putInt("sessionId", sessionId);
-                  preferences.end();
-                  offlineFrameCount = 0;
-                }
-
-                time_t now = time(nullptr);
-                if (now > 1000000) {
-                  struct tm timeinfo;
-                  gmtime_r(&now, &timeinfo);
-                  char buf[20];
-                  snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d",
-                           timeinfo.tm_year + 1900,
-                           timeinfo.tm_mon + 1,
-                           timeinfo.tm_mday,
-                           timeinfo.tm_hour,
-                           timeinfo.tm_min,
-                           timeinfo.tm_sec);
-                  sessionStartTimestamp = String(buf);
-                } else {
-                  sessionStartTimestamp = "";
-                }
-                Serial.printf("Active offline session s%04d (job %d, startFrame %d) at %s\n", sessionId, currentJobId, offlineFrameCount, sessionStartTimestamp.c_str());
+                beginOfflineSession(); // job-aware: resumes only the SAME print after a reboot, never a different one
               }
             } else if (printSessionActive && state != "PRINTING" && state != "PAUSED" && state != "ATTENTION" && state != "BUSY") {
               printSessionActive = false;
               activeTriggerMode = "auto";
 
-              if (offlineMode && sdCardAvailable && offlineFrameCount > 0) {
-                if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
-                File jsonFile = SD_MMC.open("/lapse/sessions.jsonl", FILE_APPEND);
-                if (jsonFile) {
-                  String ts = sessionStartTimestamp;
-                  if (ts == "") {
-                    time_t now = time(nullptr);
-                    if (now > 1000000) {
-                      struct tm timeinfo;
-                      gmtime_r(&now, &timeinfo);
-                      char buf[20];
-                      snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d",
-                               timeinfo.tm_year + 1900,
-                               timeinfo.tm_mon + 1,
-                               timeinfo.tm_mday,
-                               timeinfo.tm_hour,
-                               timeinfo.tm_min,
-                               timeinfo.tm_sec);
-                      ts = String(buf);
-                    }
-                  }
-                  if (ts != "") {
-                    jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"timestamp\":\"%s\",\"job_id\":%d,\"job_name\":\"%s\"}\n", sessionId, offlineFrameCount, ts.c_str(), currentJobId, currentJobName.c_str());
-                  } else {
-                    jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"job_id\":%d,\"job_name\":\"%s\"}\n", sessionId, offlineFrameCount, currentJobId, currentJobName.c_str());
-                  }
-                  jsonFile.close();
-                  if (sd_mutex) xSemaphoreGive(sd_mutex);
-                  Serial.println("Updated sessions.jsonl");
-
-                  // Launch background TAR packing task with 8192-byte stack
-                  xTaskCreate(packTarTask, "packTarTask", 8192, (void*)(intptr_t)sessionId, 1, NULL);
-                } else {
-                  if (sd_mutex) xSemaphoreGive(sd_mutex);
-                }
+              if (offlineMode) {
+                finalizeOpenSession(); // closes the session under the print it belongs to + clears the persisted open-session marker
               }
             }
             previousPrinterState = state;
