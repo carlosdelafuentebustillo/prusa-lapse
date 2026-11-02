@@ -44,6 +44,25 @@ function getFFmpegPath() {
   return 'ffmpeg'; // fallback to system PATH
 }
 
+// Two recordings of the same print job only count as the same timelapse if their start times agree
+const START_TIME_TOLERANCE_MS = 10 * 60 * 1000;
+
+function parseSessionTimestampMs(ts) {
+  if (!ts || typeof ts !== 'string' || ts.length < 15) return null;
+  const ms = new Date(
+    parseInt(ts.slice(0, 4), 10), parseInt(ts.slice(4, 6), 10) - 1, parseInt(ts.slice(6, 8), 10),
+    parseInt(ts.slice(9, 11), 10), parseInt(ts.slice(11, 13), 10), parseInt(ts.slice(13, 15), 10)
+  ).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function startTimesConflict(tsA, tsB) {
+  const a = parseSessionTimestampMs(tsA);
+  const b = parseSessionTimestampMs(tsB);
+  if (a === null || b === null) return false;
+  return Math.abs(a - b) > START_TIME_TOLERANCE_MS;
+}
+
 function generateSessionTimestamp(date = new Date()) {
   return date.getFullYear() +
     String(date.getMonth() + 1).padStart(2, '0') +
@@ -1120,10 +1139,17 @@ class MonitorService {
                         }
                       }
                       
-                      // Merge remote sessions across DIFFERENT cameras when they represent the same print
+                      // Merge remote sessions across DIFFERENT cameras when they represent the same print.
+                      // A shared job ID alone is NOT enough: if both cameras report an explicit start time and those
+                      // start times are far apart, they are different recordings (e.g. one camera rebooted or carried
+                      // frames over from an unfinished session) and must never be glued into one timelapse.
                       const existingRemote = newRemoteCache.find(s => {
                         if (s.remoteSessionIds && s.remoteSessionIds[ip]) return false; // Never merge two sessions from the same camera!
-                        if (data.job_id && s.jobId && data.job_id === s.jobId) return true;
+                        const explicitStartsConflict = Boolean(
+                          data.timestamp && s.hasExplicitTimestamp &&
+                          Math.abs(s.originalDate - targetDate.getTime()) > START_TIME_TOLERANCE_MS
+                        );
+                        if (data.job_id && s.jobId && data.job_id === s.jobId) return !explicitStartsConflict;
                         if (data.timestamp && s.hasExplicitTimestamp && Math.abs(s.originalDate - targetDate.getTime()) < 120000) return true;
                         const existingSid = Object.values(s.remoteSessionIds || {})[0];
                         if (!data.timestamp && !s.hasExplicitTimestamp && existingSid && existingSid === data.session) return true;
@@ -1173,12 +1199,24 @@ class MonitorService {
         const cameraIps = config?.cameraIps || [];
 
         for (const remote of this.remoteSessionsCache) {
-          const remoteKey = remote.jobId ? `job_${remote.jobId}` : (remote.timestamp || remote.id);
+          // Key by the unique remote id (not the job ID): two recordings of the same print job that
+          // are genuinely separate timelapses must each keep their own card.
+          const remoteKey = remote.id || remote.timestamp;
           if (seenRemoteKeys.has(remoteKey)) continue;
           seenRemoteKeys.add(remoteKey);
           const matchingLocal = sessions.find(local => {
             if (local.isRemote) return false;
             if (local.timestamp && remote.timestamp && local.timestamp === remote.timestamp) return true;
+
+            // The session currently being synced from this remote always belongs to it
+            if (this.fetchStatus?.isFetching && this.fetchStatus.sessionId === local.id && (
+              this.fetchStatus.remoteSessionId === remote.id ||
+              this.fetchStatus.sessionTimestamp === remote.timestamp
+            )) return true;
+
+            // Never match on job ID when both start times are explicit and far apart: different recording
+            if (remote.hasExplicitTimestamp && startTimesConflict(local.timestamp, remote.timestamp)) return false;
+
             if (remote.jobId && (local.jobId === remote.jobId || local.meta?.jobId === remote.jobId)) return true;
 
             // Never match if job IDs explicitly conflict
