@@ -4,22 +4,38 @@ import { exec } from 'child_process';
 import { existsSync, createWriteStream } from 'fs';
 import * as tar from 'tar';
 
-const CONFIG_FILE = path.join(process.cwd(), 'prusa-lapse.config.json');
-const CAPTURES_DIR = path.join(process.cwd(), 'public', 'captures');
+const CONFIG_FILE = process.env.PRUSALAPSE_CONFIG_FILE || path.join(process.cwd(), 'prusa-lapse.config.json');
+const CAPTURES_DIR = process.env.PRUSALAPSE_CAPTURES_DIR || path.join(process.cwd(), 'public', 'captures');
 
 function getFFmpegPath() {
+  // 1. Explicit environment variable override
+  if (process.env.FFMPEG_PATH && existsSync(process.env.FFMPEG_PATH)) {
+    return process.env.FFMPEG_PATH;
+  }
+
   const platform = process.platform;
   const arch = process.arch;
   let platformDir = '';
-  let binaryName = 'ffmpeg';
+  let binaryName = platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
 
   if (platform === 'win32') {
     platformDir = `win32-${arch}`;
-    binaryName = 'ffmpeg.exe';
   } else if (platform === 'darwin') {
     platformDir = `darwin-${arch}`;
   } else if (platform === 'linux') {
     platformDir = `linux-${arch}`;
+  }
+
+  // 2. Portable distribution bin/ directory (e.g. ./bin/ffmpeg.exe or ../bin/ffmpeg.exe)
+  const portableBin = path.join(process.cwd(), 'bin', binaryName);
+  if (existsSync(portableBin)) return portableBin;
+  const parentBin = path.join(process.cwd(), '..', 'bin', binaryName);
+  if (existsSync(parentBin)) return parentBin;
+
+  // 3. Bundled @ffmpeg-installer package in node_modules
+  const explicitWinPath = path.join(process.cwd(), 'node_modules', '@ffmpeg-installer', 'win32-x64', 'ffmpeg.exe');
+  if (platform === 'win32' && existsSync(explicitWinPath)) {
+    return explicitWinPath;
   }
 
   const localPath = path.join(
@@ -29,19 +45,16 @@ function getFFmpegPath() {
     platformDir,
     binaryName
   );
-
-  const explicitWinPath = path.join(process.cwd(), 'node_modules', '@ffmpeg-installer', 'win32-x64', 'ffmpeg.exe');
-  if (platform === 'win32') return explicitWinPath; // Hardcode for windows workspace since existsSync might fail in Turbopack
-  
   if (platformDir && existsSync(localPath)) {
     return localPath;
   }
   
-  // Fallback to nested node_modules
+  // 4. Fallback to nested node_modules
   const nestedPath = path.join(process.cwd(), 'node_modules', '@ffmpeg-installer', 'ffmpeg', 'node_modules', '@ffmpeg-installer', platformDir, binaryName);
   if (platformDir && existsSync(nestedPath)) return nestedPath;
 
-  return 'ffmpeg'; // fallback to system PATH
+  // 5. Fallback to system PATH (e.g. Linux /usr/bin/ffmpeg or Docker container)
+  return 'ffmpeg';
 }
 
 // Two recordings of the same print job only count as the same timelapse if their start times agree

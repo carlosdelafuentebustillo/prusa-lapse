@@ -1,0 +1,21 @@
+[Unit]
+Description=PrusaLapse Timelapse & Multi-Camera Monitoring Server
+Documentation=https://github.com/carlosdelafuentebustillo/prusa-lapse
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/prusalapse
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOSTNAME=0.0.0.0
+ExecStart=/usr/bin/node /opt/prusalapse/server.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=prusalapse
+
+[Install]
+WantedBy=multi-user.target
