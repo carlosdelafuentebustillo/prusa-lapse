@@ -11,6 +11,8 @@ function findLatestFirmware() {
     path.resolve(process.cwd(), 'firmware/.pio/build/esp32cam/firmware.bin'),
     path.resolve(process.cwd(), 'public/firmware.bin'),
     path.resolve(process.cwd(), '../public/firmware.bin'),
+    path.resolve(process.cwd(), 'firmware.bin'),
+    path.resolve(process.cwd(), '../firmware.bin'),
     'C:/Users/cafub/Documents/Antigravity/dual-dalmatian/firmware/.pio/build/esp32cam/firmware.bin'
   ];
 
@@ -122,8 +124,11 @@ export async function POST(request) {
       try {
         tmpPath = path.join(os.tmpdir(), `esp32_ota_${Date.now()}.bin`);
         fs.writeFileSync(tmpPath, fileBuffer);
+        const curlName = process.platform === 'win32' ? 'curl.exe' : 'curl';
+        const localCurl = path.join(process.cwd(), 'bin', curlName);
+        const curlCmd = fs.existsSync(localCurl) ? localCurl : curlName;
         return await new Promise((resolve) => {
-          execFile('curl.exe', ['-s', '-S', '-F', `update=@${tmpPath}`, `http://${ip}/update`], { timeout: 90000 }, (err, stdout) => {
+          execFile(curlCmd, ['-s', '-S', '-F', `update=@${tmpPath}`, `http://${ip}/update`], { timeout: 90000 }, (err, stdout) => {
             try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (e) {}
             if (err) return resolve(null);
             resolve(stdout.trim());

@@ -21,8 +21,8 @@ String prusaConnectFingerprint = "";
 int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
-#define VERSION_MINOR 15
-#define FIRMWARE_VERSION "v1.2.15"
+#define VERSION_MINOR 3
+#define FIRMWARE_VERSION "v1.3.0"
 
 String deviceMacHex = "";
 String getDeviceMacHex() {

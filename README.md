@@ -31,12 +31,26 @@ This repository is divided into five main components:
 
 ## Getting Started
 
-To build your own Prusa-lapse setup, follow the instructions in each component's directory in this order:
+### Option A: Portable Desktop App (Zero Install — Windows & Linux)
+Download the pre-built portable bundle from the latest [Release](releases/):
+* **Windows (64-bit)**: Extract `prusalapse-v1.3.0-windows-x64.zip` and double-click `PrusaLapse.exe`. No Node.js or setup required!
+* **Linux (x86_64)**: Extract `prusalapse-v1.3.0-linux-x64.tar.gz` and run `./prusalapse`. Works out-of-the-box on Ubuntu, Debian, Fedora, Arch, etc.
 
-1.  Review the [Hardware Guide](hardware/README.md) to gather your parts, print the mounts, and wire your triggers.
-2.  Follow the [Firmware Guide](firmware/README.md) to flash your ESP32-CAMs.
-3.  Configure your slicer using the [Slicer Guide](slicer/README.md).
-4.  **`/webapp`**: Run the Next.js web application in the [webapp directory](webapp/README.md) to manage your cameras, fetch saved offline sessions, and compile the final video.
+### Option B: Home Server / Docker Deployment (CasaOS, TrueNAS, Unraid)
+Run anywhere with Docker Compose:
+```bash
+docker compose up -d
+```
+All timelapses (`./captures`) and settings (`./config`) persist automatically. See the [Docker Deployment Guide](deploy/DOCKER_DEPLOYMENT.md) for CasaOS, Unraid, TrueNAS, and systemd instructions.
+
+### Option C: Developer Setup
+1. Review the [Hardware Guide](hardware/README.md) to gather your parts and wire your triggers.
+2. Follow the [Firmware Guide](deploy/firmware/README.md) to flash your ESP32-CAMs.
+3. Configure your slicer using the [Slicer Guide](slicer/README.md).
+4. Run the webapp from source:
+   ```bash
+   cd webapp && npm install && npm run dev
+   ```
 
 ## License
 
