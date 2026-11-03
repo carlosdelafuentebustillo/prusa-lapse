@@ -1,15 +1,15 @@
 const fs = require('fs');
 const path = require('path');
-const { execSync, execFileSync } = require('child_process');
+const { execSync } = require('child_process');
 const crypto = require('crypto');
 const AdmZip = require('../webapp/node_modules/adm-zip');
-const tar = require('../webapp/node_modules/tar');
 
 const VERSION = '1.3.0';
 const ROOT_DIR = path.resolve(__dirname, '..');
 const RELEASE_DIR = path.join(ROOT_DIR, 'releases', `v${VERSION}`);
 const STAGING_DIR = path.join(ROOT_DIR, 'dist', 'staging');
-const CACHE_DIR = path.join(ROOT_DIR, 'dist', 'cache');
+const DESKTOP_DIR = path.join(ROOT_DIR, 'desktop');
+const DESKTOP_DIST_DIR = path.join(DESKTOP_DIR, 'dist');
 
 console.log('================================================================');
 console.log(`        PRUSALAPSE MASTER RELEASE BUILD PIPELINE (v${VERSION})   `);
@@ -19,7 +19,7 @@ console.log(`Release Directory: ${RELEASE_DIR}`);
 console.log();
 
 // Ensure clean directories
-[RELEASE_DIR, STAGING_DIR, CACHE_DIR].forEach((dir) => {
+[RELEASE_DIR, STAGING_DIR].forEach((dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
@@ -28,19 +28,6 @@ function computeSha256(filePath) {
   const hash = crypto.createHash('sha256');
   hash.update(fs.readFileSync(filePath));
   return hash.digest('hex');
-}
-
-// Helper: Download file if not in cache
-function ensureDownload(url, destPath) {
-  if (fs.existsSync(destPath) && fs.statSync(destPath).size > 1000000) {
-    console.log(`  [CACHE HIT] ${path.basename(destPath)}`);
-    return;
-  }
-  console.log(`  [DOWNLOADING] ${url} ...`);
-  const tmpPath = destPath + '.tmp';
-  execSync(`curl.exe -L -o "${tmpPath}" "${url}"`, { stdio: 'inherit' });
-  fs.renameSync(tmpPath, destPath);
-  console.log(`  [DOWNLOADED] ${path.basename(destPath)} (${(fs.statSync(destPath).size / 1024 / 1024).toFixed(1)} MB)`);
 }
 
 // ============================================================================
@@ -57,7 +44,7 @@ if (!fs.existsSync(fwBin)) {
   execSync('pio run -d firmware', { cwd: ROOT_DIR, stdio: 'inherit' });
 }
 
-// Sync to webapp public
+// Sync firmware.bin to webapp public for OTA updates
 fs.copyFileSync(fwBin, path.join(ROOT_DIR, 'webapp', 'public', 'firmware.bin'));
 
 const fwZip = new AdmZip();
@@ -81,7 +68,12 @@ console.log(`✓ Created: ${path.basename(fwZipPath)} (${(fs.statSync(fwZipPath)
 // STEP 2: BUILD NEXT.JS STANDALONE APPLICATION
 // ============================================================================
 console.log('\n--- Step 2: Building Webapp in Next.js Standalone Mode ---');
-execSync('npm run build', { cwd: path.join(ROOT_DIR, 'webapp'), stdio: 'inherit' });
+const standaloneServerJs = path.join(ROOT_DIR, 'webapp', '.next', 'standalone', 'server.js');
+if (!fs.existsSync(standaloneServerJs) || process.argv.includes('--rebuild-webapp')) {
+  execSync('npm run build', { cwd: path.join(ROOT_DIR, 'webapp'), stdio: 'inherit' });
+} else {
+  console.log('  [CACHE HIT] webapp/.next/standalone/server.js exists. (Pass --rebuild-webapp to force rebuild)');
+}
 
 const standaloneDir = path.join(ROOT_DIR, 'webapp', '.next', 'standalone');
 const nextStaticSrc = path.join(ROOT_DIR, 'webapp', '.next', 'static');
@@ -90,12 +82,16 @@ const publicSrc = path.join(ROOT_DIR, 'webapp', 'public');
 const publicDest = path.join(standaloneDir, 'public');
 
 // Copy static assets into standalone bundle
-console.log('  Copying static assets into standalone bundle...');
-execSync(`powershell -NoProfile -Command "Copy-Item -Path '${nextStaticSrc}' -Destination '${nextStaticDest}' -Recurse -Force"`);
-execSync(`powershell -NoProfile -Command "Copy-Item -Path '${publicSrc}' -Destination '${publicDest}' -Recurse -Force"`);
+if (!fs.existsSync(nextStaticDest)) {
+  console.log('  Copying static assets into standalone bundle...');
+  execSync(`powershell -NoProfile -Command "Copy-Item -Path '${nextStaticSrc}' -Destination '${nextStaticDest}' -Recurse -Force"`);
+}
+if (!fs.existsSync(publicDest)) {
+  execSync(`powershell -NoProfile -Command "Copy-Item -Path '${publicSrc}' -Destination '${publicDest}' -Recurse -Force"`);
+}
 
 // ============================================================================
-// STEP 3: SERVER STANDALONE PACKAGE
+// STEP 3: SERVER STANDALONE PACKAGE (ZIP)
 // ============================================================================
 console.log('\n--- Step 3: Packaging Server Standalone Bundle ---');
 const serverStageDir = path.join(STAGING_DIR, 'server-standalone');
@@ -124,129 +120,68 @@ serverZip.writeZip(serverZipPath);
 console.log(`✓ Created: ${path.basename(serverZipPath)} (${(fs.statSync(serverZipPath).size / 1024 / 1024).toFixed(2)} MB)`);
 
 // ============================================================================
-// STEP 4: WINDOWS PORTABLE APPLICATION (x64)
+// STEP 4: DESKTOP APPLICATION PACKAGING (Windows & Linux Electron)
 // ============================================================================
-console.log('\n--- Step 4: Packaging Windows Portable Application ---');
-const winStageDir = path.join(STAGING_DIR, `prusalapse-v${VERSION}-windows-x64`);
-if (fs.existsSync(winStageDir)) fs.rmSync(winStageDir, { recursive: true, force: true });
-fs.mkdirSync(winStageDir, { recursive: true });
+console.log('\n--- Step 4: Staging & Packaging Desktop Applications ---');
 
-// 1. Download / Cache portable node.exe (Windows x64)
-const nodeWinUrl = 'https://nodejs.org/dist/v20.18.0/win-x64/node.exe';
-const cachedNodeExe = path.join(CACHE_DIR, 'node-v20.18.0-win-x64.exe');
-ensureDownload(nodeWinUrl, cachedNodeExe);
+// 1. Stage standalone files and binaries into desktop/
+execSync('node stage-desktop.js', { cwd: DESKTOP_DIR, stdio: 'inherit' });
 
-const winRuntimeDir = path.join(winStageDir, 'runtime');
-fs.mkdirSync(winRuntimeDir, { recursive: true });
-fs.copyFileSync(cachedNodeExe, path.join(winRuntimeDir, 'node.exe'));
+// 2. Check if desktop binaries need to be built
+const winInstaller = path.join(DESKTOP_DIST_DIR, `PrusaLapse-Setup-${VERSION}.exe`);
+const winPortable = path.join(DESKTOP_DIST_DIR, `PrusaLapse-${VERSION}-portable.exe`);
+const linuxPortable = path.join(DESKTOP_DIST_DIR, `PrusaLapse-${VERSION}-linux-x64.tar.gz`);
 
-// 2. Bundle Binaries (ffmpeg.exe and curl.exe)
-const winBinDir = path.join(winStageDir, 'bin');
-fs.mkdirSync(winBinDir, { recursive: true });
-const winFfmpegSrc = path.join(ROOT_DIR, 'webapp', 'node_modules', '@ffmpeg-installer', 'win32-x64', 'ffmpeg.exe');
-if (fs.existsSync(winFfmpegSrc)) {
-  fs.copyFileSync(winFfmpegSrc, path.join(winBinDir, 'ffmpeg.exe'));
-}
-const sysCurl = 'C:\\Windows\\System32\\curl.exe';
-if (fs.existsSync(sysCurl)) {
-  fs.copyFileSync(sysCurl, path.join(winBinDir, 'curl.exe'));
+const needWinBuild = !fs.existsSync(winInstaller) || !fs.existsSync(winPortable) || process.argv.includes('--rebuild-desktop');
+const needLinuxBuild = !fs.existsSync(linuxPortable) || process.argv.includes('--rebuild-desktop');
+
+if (needWinBuild) {
+  console.log('  Building Windows Desktop (Installer & Portable) with Electron Builder...');
+  execSync('npm run build:win', { cwd: DESKTOP_DIR, stdio: 'inherit' });
+} else {
+  console.log('  [CACHE HIT] Windows Desktop binaries exist in desktop/dist.');
 }
 
-// 3. Compile Native Windows Launcher (PrusaLapse.exe)
-const cscPath = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe';
-const launcherCs = path.join(ROOT_DIR, 'deploy', 'windows', 'launcher.cs');
-const icoPath = path.join(ROOT_DIR, 'prusalapse.ico');
-const winExeOut = path.join(winStageDir, 'PrusaLapse.exe');
-
-console.log('  Compiling PrusaLapse.exe native Windows launcher...');
-execSync(`"${cscPath}" /nologo /win32icon:"${icoPath}" /out:"${winExeOut}" "${launcherCs}"`, { stdio: 'inherit' });
-
-// 4. Copy fallback batch launcher and README
-fs.copyFileSync(path.join(ROOT_DIR, 'deploy', 'windows', 'PrusaLapse.bat'), path.join(winStageDir, 'PrusaLapse.bat'));
-fs.copyFileSync(path.join(ROOT_DIR, 'deploy', 'windows', 'README.md'), path.join(winStageDir, 'README.md'));
-
-// 5. Copy Next.js Standalone Application to app/
-const winAppDir = path.join(winStageDir, 'app');
-fs.mkdirSync(winAppDir, { recursive: true });
-execSync(`powershell -NoProfile -Command "Copy-Item -Path '${standaloneDir}\\*' -Destination '${winAppDir}' -Recurse -Force"`);
-
-// 6. Zip Windows Portable package
-const winZipPath = path.join(RELEASE_DIR, `prusalapse-v${VERSION}-windows-x64.zip`);
-console.log('  Zipping Windows portable package...');
-const winZip = new AdmZip();
-winZip.addLocalFolder(winStageDir, `prusalapse-v${VERSION}-windows-x64`);
-winZip.writeZip(winZipPath);
-console.log(`✓ Created: ${path.basename(winZipPath)} (${(fs.statSync(winZipPath).size / 1024 / 1024).toFixed(2)} MB)`);
-
-// ============================================================================
-// STEP 5: LINUX PORTABLE APPLICATION (x64)
-// ============================================================================
-console.log('\n--- Step 5: Packaging Linux Portable Application ---');
-const linuxStageDir = path.join(STAGING_DIR, `prusalapse-v${VERSION}-linux-x64`);
-if (fs.existsSync(linuxStageDir)) fs.rmSync(linuxStageDir, { recursive: true, force: true });
-fs.mkdirSync(linuxStageDir, { recursive: true });
-
-// 1. Download / Extract Linux x64 Node.js binary
-const nodeLinuxUrl = 'https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.gz';
-const cachedNodeTar = path.join(CACHE_DIR, 'node-v20.18.0-linux-x64.tar.gz');
-ensureDownload(nodeLinuxUrl, cachedNodeTar);
-
-const linuxRuntimeBinDir = path.join(linuxStageDir, 'runtime', 'bin');
-fs.mkdirSync(linuxRuntimeBinDir, { recursive: true });
-
-console.log('  Extracting Linux node binary from tar.gz...');
-tar.extract({
-  file: cachedNodeTar,
-  cwd: CACHE_DIR,
-  filter: (path) => path.endsWith('/bin/node'),
-  sync: true,
-});
-
-const extractedNode = path.join(CACHE_DIR, 'node-v20.18.0-linux-x64', 'bin', 'node');
-if (fs.existsSync(extractedNode)) {
-  fs.copyFileSync(extractedNode, path.join(linuxRuntimeBinDir, 'node'));
+if (needLinuxBuild) {
+  console.log('  Building Linux Desktop bundle with Electron Builder...');
+  execSync('npm run build:linux', { cwd: DESKTOP_DIR, stdio: 'inherit' });
+} else {
+  console.log('  [CACHE HIT] Linux Desktop tar.gz exists in desktop/dist.');
 }
 
-// 2. Copy Linux launcher scripts and desktop entries
-fs.copyFileSync(path.join(ROOT_DIR, 'deploy', 'linux', 'prusalapse'), path.join(linuxStageDir, 'prusalapse'));
-fs.copyFileSync(path.join(ROOT_DIR, 'deploy', 'linux', 'prusalapse.desktop'), path.join(linuxStageDir, 'prusalapse.desktop'));
-fs.copyFileSync(path.join(ROOT_DIR, 'deploy', 'linux', 'README.md'), path.join(linuxStageDir, 'README.md'));
+// 3. Copy desktop binaries to releases directory
+console.log('  Copying desktop distribution assets to release folder...');
+fs.copyFileSync(winInstaller, path.join(RELEASE_DIR, `PrusaLapse-Setup-${VERSION}.exe`));
+fs.copyFileSync(winPortable, path.join(RELEASE_DIR, `PrusaLapse-${VERSION}-portable.exe`));
+fs.copyFileSync(linuxPortable, path.join(RELEASE_DIR, `PrusaLapse-${VERSION}-linux-x64.tar.gz`));
 
-// 3. Copy Next.js Standalone Application to app/
-const linuxAppDir = path.join(linuxStageDir, 'app');
-fs.mkdirSync(linuxAppDir, { recursive: true });
-execSync(`powershell -NoProfile -Command "Copy-Item -Path '${standaloneDir}\\*' -Destination '${linuxAppDir}' -Recurse -Force"`);
+console.log(`✓ Copied: PrusaLapse-Setup-${VERSION}.exe (${(fs.statSync(winInstaller).size / 1024 / 1024).toFixed(1)} MB)`);
+console.log(`✓ Copied: PrusaLapse-${VERSION}-portable.exe (${(fs.statSync(winPortable).size / 1024 / 1024).toFixed(1)} MB)`);
+console.log(`✓ Copied: PrusaLapse-${VERSION}-linux-x64.tar.gz (${(fs.statSync(linuxPortable).size / 1024 / 1024).toFixed(1)} MB)`);
 
-// 4. Create tar.gz for Linux (preserves POSIX permissions)
-const linuxTarPath = path.join(RELEASE_DIR, `prusalapse-v${VERSION}-linux-x64.tar.gz`);
-console.log('  Creating Linux tar.gz package...');
-tar.create(
-  {
-    gzip: true,
-    file: linuxTarPath,
-    cwd: STAGING_DIR,
-    portable: true,
-    sync: true
-  },
-  [`prusalapse-v${VERSION}-linux-x64`]
-);
-console.log(`✓ Created: ${path.basename(linuxTarPath)} (${(fs.statSync(linuxTarPath).size / 1024 / 1024).toFixed(2)} MB)`);
+// Clean up legacy non-electron zips if present
+const legacyWinZip = path.join(RELEASE_DIR, `prusalapse-v${VERSION}-windows-x64.zip`);
+const legacyLinuxTar = path.join(RELEASE_DIR, `prusalapse-v${VERSION}-linux-x64.tar.gz`);
+if (fs.existsSync(legacyWinZip)) fs.rmSync(legacyWinZip);
+if (fs.existsSync(legacyLinuxTar)) fs.rmSync(legacyLinuxTar);
 
 // ============================================================================
-// STEP 6: DOCKER & COMPOSE ASSETS
+// STEP 5: DOCKER & SERVER DEPLOYMENT ASSETS
 // ============================================================================
-console.log('\n--- Step 6: Copying Docker & Compose Release Files ---');
+console.log('\n--- Step 5: Copying Docker & Compose Release Files ---');
 fs.copyFileSync(path.join(ROOT_DIR, 'Dockerfile'), path.join(RELEASE_DIR, 'Dockerfile'));
 fs.copyFileSync(path.join(ROOT_DIR, 'docker-compose.yml'), path.join(RELEASE_DIR, 'docker-compose.yml'));
 fs.copyFileSync(path.join(ROOT_DIR, 'deploy', 'DOCKER_DEPLOYMENT.md'), path.join(RELEASE_DIR, 'DOCKER_DEPLOYMENT.md'));
+console.log('✓ Copied Dockerfile, docker-compose.yml, and DOCKER_DEPLOYMENT.md');
 
 // ============================================================================
-// STEP 7: SHA-256 CHECKSUMS
+// STEP 6: SHA-256 CHECKSUMS
 // ============================================================================
-console.log('\n--- Step 7: Generating SHA-256 Checksums ---');
+console.log('\n--- Step 6: Generating SHA-256 Checksums ---');
 const releaseFiles = [
-  `prusalapse-v${VERSION}-windows-x64.zip`,
-  `prusalapse-v${VERSION}-linux-x64.tar.gz`,
+  `PrusaLapse-Setup-${VERSION}.exe`,
+  `PrusaLapse-${VERSION}-portable.exe`,
+  `PrusaLapse-${VERSION}-linux-x64.tar.gz`,
   `prusalapse-v${VERSION}-server-standalone.zip`,
   `prusalapse-v${VERSION}-firmware.zip`,
   'Dockerfile',
@@ -268,9 +203,9 @@ fs.writeFileSync(path.join(RELEASE_DIR, 'CHECKSUMS.txt'), checksumsText);
 console.log('✓ Generated: CHECKSUMS.txt');
 
 // ============================================================================
-// STEP 8: RELEASE NOTES
+// STEP 7: RELEASE NOTES
 // ============================================================================
-console.log('\n--- Step 8: Generating Release Notes ---');
+console.log('\n--- Step 7: Generating Release Notes ---');
 const releaseNotes = `# PrusaLapse v${VERSION} Release
 
 **Cinematic Multi-Camera Timelapses for Prusa 3D Printers (MK4 / MK3.9 / MINI / Core One / XL)**
@@ -279,22 +214,26 @@ const releaseNotes = `# PrusaLapse v${VERSION} Release
 
 ## What's New in v${VERSION}
 
-### 1. Portable Desktop Applications (Zero Install)
-* **Windows (64-bit)**: \`prusalapse-v${VERSION}-windows-x64.zip\`
-  * Fully self-contained desktop package featuring an embedded **Node.js 20 LTS** runtime, bundled **FFmpeg**, and a native **\`PrusaLapse.exe\`** launcher with custom branding.
-  * Zero prerequisites: Does **not** require Node.js, Git, or npm installed on the computer. Simply extract and double-click to run!
-* **Linux (x86_64)**: \`prusalapse-v${VERSION}-linux-x64.tar.gz\`
-  * Self-contained distribution with embedded Linux Node.js runtime and an executable launcher script (\`./prusalapse\`).
-  * Includes \`.desktop\` file for seamless desktop application menu integration on Ubuntu, Debian, Fedora, Arch, etc.
+### 1. Dedicated Desktop Applications (Windows & Linux)
+* **Windows Installer (\`PrusaLapse-Setup-${VERSION}.exe\`)**:
+  * Professional NSIS installation wizard with customizable install directory.
+  * Creates Start Menu and Desktop shortcuts, plus clean uninstaller in Windows Settings / Add & Remove Programs.
+  * Dedicated native window with dark UI theme (\`#121417\`), auto-hidden menubar, bundled FFmpeg, and seamless system integration.
+* **Windows Portable Desktop App (\`PrusaLapse-${VERSION}-portable.exe\`)**:
+  * 100% portable, single-file native desktop executable.
+  * Zero prerequisites: Does **not** require Node.js, Git, or administrative privileges. Simply download, double-click, and run anywhere (e.g. USB flash drive).
+* **Linux Desktop App (\`PrusaLapse-${VERSION}-linux-x64.tar.gz\`)**:
+  * Dedicated native Electron desktop window for Linux (Ubuntu, Debian, Fedora, Arch, etc.).
+  * Extract and run \`./prusalapse-desktop\` with zero external Node.js dependencies.
 
 ### 2. Universal Server & Container Deployment
 * **Docker & Docker Compose**:
   * Multi-stage Alpine container image with built-in FFmpeg, curl, and non-root execution.
   * \`docker-compose.yml\` with persistent volume mappings for timelapse captures and camera configuration.
   * Ready for 1-click deployment on **CasaOS**, **TrueNAS SCALE**, **Unraid**, **Portainer**, and standard VPS.
-* **Server Standalone Package**: \`prusalapse-v${VERSION}-server-standalone.zip\`
+* **Server Standalone Package (\`prusalapse-v${VERSION}-server-standalone.zip\`)**:
   * Minified Next.js standalone build that boots in <50ms with \`node server.js\`.
-  * Includes Linux \`systemd\` service unit for headless Raspberry Pi / home server background execution.
+  * Includes Linux \`systemd\` service unit (\`prusalapse.service\`) for headless Raspberry Pi / home server background execution.
 
 ### 3. Firmware v1.3.0 (ESP32-CAM)
 * **High-Speed Paced Polling (400ms – 550ms)**: Eliminates the polling race condition across multiple cameras, guaranteeing 100% layer trigger detection inside parked G-code dwell windows (\`M220 S99\`).
@@ -304,16 +243,18 @@ const releaseNotes = `# PrusaLapse v${VERSION} Release
 
 ---
 
-## Release Assets
-| Package | Description | Platform |
-| :--- | :--- | :--- |
-| **\`prusalapse-v${VERSION}-windows-x64.zip\`** | Portable Desktop App (Zero-install) | Windows 10/11 x64 |
-| **\`prusalapse-v${VERSION}-linux-x64.tar.gz\`** | Portable Desktop App (Zero-install) | Linux x86_64 |
-| **\`prusalapse-v${VERSION}-server-standalone.zip\`** | Standalone Node.js server bundle | Any Node.js host |
-| **\`prusalapse-v${VERSION}-firmware.zip\`** | ESP32-CAM firmware & flasher scripts | ESP32-CAM |
-| **\`Dockerfile\`** | Production multi-stage Alpine Dockerfile | Containers |
-| **\`docker-compose.yml\`** | 1-click Docker Compose launcher | Containers |
-| **\`CHECKSUMS.txt\`** | SHA-256 verification hashes | All |
+## Release Assets & Verification
+
+| Package | Type | Platform | Description |
+| :--- | :--- | :--- | :--- |
+| **\`PrusaLapse-Setup-${VERSION}.exe\`** | Desktop Installer | Windows 10/11 x64 | Full installer wizard with desktop & start menu shortcuts |
+| **\`PrusaLapse-${VERSION}-portable.exe\`** | Portable Desktop | Windows 10/11 x64 | Single-file zero-install dedicated desktop app |
+| **\`PrusaLapse-${VERSION}-linux-x64.tar.gz\`** | Portable Desktop | Linux x86_64 | Dedicated native desktop app for Linux distributions |
+| **\`prusalapse-v${VERSION}-server-standalone.zip\`** | Web App / Server | Any Node.js host | Headless server bundle with systemd service unit |
+| **\`prusalapse-v${VERSION}-firmware.zip\`** | Firmware & Tooling | ESP32-CAM | Firmware v1.3.0 binaries & 1-click serial flasher scripts |
+| **\`Dockerfile\`** | Container | Docker / Podman | Production multi-stage Alpine Dockerfile |
+| **\`docker-compose.yml\`** | Orchestration | Docker Compose | 1-click stack for CasaOS, Unraid, TrueNAS, VPS |
+| **\`CHECKSUMS.txt\`** | Verification | All | Cryptographic SHA-256 hashes for all release artifacts |
 `;
 
 fs.writeFileSync(path.join(RELEASE_DIR, 'RELEASE_NOTES.md'), releaseNotes);
