@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { monitor, extractCameraMac } from '../../../../lib/monitor';
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
@@ -17,6 +18,9 @@ export async function GET(request) {
 
     if (res.ok) {
       const data = await res.json();
+      const mac = extractCameraMac(data);
+      if (mac && !data.mac) data.mac = mac;
+      monitor.recordCameraIdentity(ip, data).catch(() => {});
       return NextResponse.json(data);
     } else {
       return NextResponse.json({ error: `Camera returned status ${res.status}` }, { status: res.status });

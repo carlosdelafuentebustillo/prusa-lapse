@@ -5,6 +5,11 @@ export const metadata = {
   description: "An open-source multi-camera cinematic timelapse controller for the Prusa MK4s using ESP32-CAM modules.",
 };
 
+export const viewport = {
+  colorScheme: "dark",
+  themeColor: "#0B0E13",
+};
+
 export default function RootLayout({ children }) {
   return (
     <html lang="en">

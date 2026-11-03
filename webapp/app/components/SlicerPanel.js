@@ -7,9 +7,17 @@ import { saveAs } from 'file-saver';
 
 const GcodePreview3D = dynamic(() => import('./GcodePreview3D'), { ssr: false });
 
+const PRINTER_PRESETS = [
+  { name: 'MK4 / MK3.9', x: 240, y: 210, desc: '250×210 bed' },
+  { name: 'Core One', x: 245, y: 215, desc: '250×220 bed' },
+  { name: 'MINI / MINI+', x: 175, y: 175, desc: '180×180 bed' },
+  { name: 'XL', x: 350, y: 350, desc: '360×360 bed' },
+];
+
 export default function SlicerPanel() {
   const [collapsed, setCollapsed] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showSnippetPreview, setShowSnippetPreview] = useState(false);
   const [show3DPreview, setShow3DPreview] = useState(false);
   const [parsedGcode, setParsedGcode] = useState(null);
   const [triggerType, setTriggerType] = useState('park');
@@ -24,52 +32,143 @@ export default function SlicerPanel() {
     parkX: 240,
     parkY: 210,
     travelSpeed: 9000,
-    retractDistance: 0.8,
+    retractDistance: 0,
     retractSpeed: 2100,
     zHopHeight: 0.4,
     settleTime: 300,
-    captureTime: 1200,
+    captureTime: 1500,
     qualityMode: 'balanced',
     triggerSignal: 'm220',
   });
 
   const buildPrusaSlicerSnippet = () => {
-    const signalCmd =
+    const signalLines =
       config.triggerSignal === 'm221'
-        ? 'M221 S99 ; Trigger Prusa-lapse capture via flow factor\nG4 P' + config.captureTime + ' ; Wait for camera capture\nM221 S100 ; Restore 100% flow'
+        ? [
+            'M221 S99 ; Trigger Prusa-lapse capture via flow factor',
+            `G4 P${config.captureTime} ; Wait for camera capture`,
+            'M221 S100 ; Restore 100% flow',
+          ]
         : config.triggerSignal === 'gpio0'
-        ? 'M264 P0 S1\nG4 P100\nM264 P0 S0\nG4 P' + config.captureTime
+        ? [
+            'M264 P0 S1 ; Trigger Hackerboard GPIO',
+            'G4 P100 ; Pulse duration',
+            'M264 P0 S0 ; Reset GPIO',
+            `G4 P${config.captureTime} ; Wait for camera capture`,
+          ]
         : config.triggerSignal === 'serial'
-        ? 'M118 action:capture_photo\nG4 P' + config.captureTime
-        : 'M220 S99 ; Trigger Prusa-lapse capture via speed factor\nG4 P' + config.captureTime + ' ; Wait for camera capture\nM220 S100 ; Restore 100% speed';
+        ? [
+            'M118 action:capture_photo ; Trigger Serial',
+            `G4 P${config.captureTime} ; Wait for camera capture`,
+          ]
+        : [
+            'M220 S99 ; Trigger Prusa-lapse capture via speed factor',
+            `G4 P${config.captureTime} ; Wait for camera capture`,
+            'M220 S100 ; Restore 100% speed',
+          ];
 
-    return [
-      ';AFTER_LAYER_CHANGE',
-      ';[layer_z]',
-      '{if layer_num > 0}',
-      '; --- PRUSA-LAPSE START ---',
-      'M83 ; Relative extrusion',
-      `G1 E-${config.retractDistance} F${config.retractSpeed} ; Retract to prevent oozing during park`,
-      'G91 ; Relative positioning',
-      `G1 Z${config.zHopHeight} F1200 ; Z-hop lift`,
-      'G90 ; Absolute positioning',
-      `G1 X${config.parkX} Y${config.parkY} F${config.travelSpeed} ; Park toolhead`,
-      'M400 ; Wait for park move to complete',
-      `G4 P${config.settleTime} ; Settle frame vibrations`,
-      signalCmd,
-      'G1 Z[layer_z] F1200 ; Restore exact layer Z height',
-      `G1 E${config.retractDistance} F${config.retractSpeed} ; Un-retract filament`,
-      '; --- PRUSA-LAPSE END ---',
-      '{endif}',
-    ].join('\n');
+    const lines =
+      triggerType === 'snap'
+        ? [
+            ';AFTER_LAYER_CHANGE',
+            ';[layer_z]',
+            '{if layer_num > 0}',
+            '; --- PRUSA-LAPSE START (Snap In-Place) ---',
+            'M83 ; Force relative extrusion mode',
+            'M400 ; Wait for layer moves to finish',
+            `G4 P${config.settleTime} ; Settle frame vibrations`,
+            ...signalLines,
+            'G90 ; Set absolute positioning for XYZ',
+            'M83 ; CRITICAL: Ensure relative extrusion mode for PrusaSlicer',
+            '; --- PRUSA-LAPSE END ---',
+            '{endif}',
+            '',
+          ]
+        : [
+            ';AFTER_LAYER_CHANGE',
+            ';[layer_z]',
+            '{if layer_num > 0}',
+            '; --- PRUSA-LAPSE START ---',
+            'M83 ; Force relative extrusion mode',
+            ...(config.retractDistance > 0
+              ? [`G1 E-${config.retractDistance} F${config.retractSpeed} ; Extra retract`]
+              : []),
+            ...(config.zHopHeight > 0
+              ? [`G1 Z{layer_z + ${config.zHopHeight}} F1200 ; Z-hop lift above current layer`]
+              : []),
+            `G1 X${config.parkX} Y${config.parkY} F${config.travelSpeed} ; Park toolhead`,
+            'M400 ; Wait for park move to complete',
+            `G4 P${config.settleTime} ; Settle frame vibrations`,
+            ...signalLines,
+            ...(config.zHopHeight > 0
+              ? ['G1 Z[layer_z] F1200 ; Restore exact layer Z height']
+              : []),
+            ...(config.retractDistance > 0
+              ? [`G1 E${config.retractDistance} F${config.retractSpeed} ; Un-retract extra`]
+              : []),
+            'G90 ; Set absolute positioning for XYZ',
+            'M83 ; CRITICAL: Restore relative extrusion mode for PrusaSlicer!',
+            '; --- PRUSA-LAPSE END ---',
+            '{endif}',
+            '',
+          ];
+
+    return lines.join('\r\n');
   };
 
   const handleCopySnippet = async () => {
-    try {
-      await navigator.clipboard.writeText(buildPrusaSlicerSnippet());
+    const textToCopy = buildPrusaSlicerSnippet();
+    let success = false;
+
+    // Primary: Modern Async Clipboard API (passes exact CRLF string directly)
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(textToCopy);
+        success = true;
+      } catch (e) {
+        console.warn('navigator.clipboard.writeText failed, using event fallback:', e);
+      }
+    }
+
+    // Secondary: copy event listener with clipboardData (preserves CRLF on Windows for LAN HTTP access)
+    if (!success && typeof document !== 'undefined') {
+      try {
+        const listener = (e) => {
+          e.clipboardData.setData('text/plain', textToCopy);
+          e.preventDefault();
+        };
+        document.addEventListener('copy', listener);
+        success = document.execCommand('copy');
+        document.removeEventListener('copy', listener);
+      } catch (e) {
+        console.warn('execCommand copy listener failed:', e);
+      }
+    }
+
+    // Tertiary: Fallback via textarea
+    if (!success && typeof document !== 'undefined') {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = textToCopy;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-9999px';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+        success = document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch (e) {
+        console.error('All copy fallbacks failed:', e);
+      }
+    }
+
+    if (success) {
       setCopiedSnippet(true);
       setTimeout(() => setCopiedSnippet(false), 3000);
-    } catch (e) {}
+    }
   };
 
   const handleProcessFile = async (selectedFile) => {
@@ -187,14 +286,52 @@ export default function SlicerPanel() {
                 </p>
               </div>
 
-              <button
-                type="button"
-                className={`btn btn-small ${copiedSnippet ? 'btn-primary' : 'btn-secondary'}`}
-                style={{ width: '100%', padding: '8px 12px', fontSize: '0.78rem' }}
-                onClick={handleCopySnippet}
-              >
-                {copiedSnippet ? '✓ Copied to Clipboard!' : 'Copy "After Layer Change" G-Code'}
-              </button>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <button
+                  type="button"
+                  className={`btn btn-small ${copiedSnippet ? 'btn-primary' : 'btn-secondary'}`}
+                  style={{ flex: 1, padding: '8px 12px', fontSize: '0.78rem' }}
+                  onClick={handleCopySnippet}
+                >
+                  {copiedSnippet ? '✓ Copied to Clipboard!' : 'Copy "After Layer Change" G-Code'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-small"
+                  style={{ padding: '8px 10px', fontSize: '0.74rem', color: 'var(--text-secondary)' }}
+                  onClick={() => setShowSnippetPreview(v => !v)}
+                  title="View or manually select G-code macro text"
+                >
+                  {showSnippetPreview ? 'Hide Code' : 'View Code'}
+                </button>
+              </div>
+
+              {showSnippetPreview && (
+                <div style={{ marginTop: '4px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                    <span>Macro Preview (Click to Select All):</span>
+                    <span>{triggerType === 'snap' ? 'Snap In-Place' : `Park X${config.parkX} Y${config.parkY}`}</span>
+                  </div>
+                  <textarea
+                    readOnly
+                    className="input-field"
+                    value={buildPrusaSlicerSnippet()}
+                    rows={8}
+                    style={{
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: '0.72rem',
+                      lineHeight: 1.45,
+                      whiteSpace: 'pre',
+                      cursor: 'text',
+                    }}
+                    onClick={(e) => e.target.select()}
+                    onCopy={(e) => {
+                      e.clipboardData.setData('text/plain', buildPrusaSlicerSnippet());
+                      e.preventDefault();
+                    }}
+                  />
+                </div>
+              )}
             </div>
 
             {/* Option 2: Instant 1-Step .gcode Drop Zone */}
@@ -335,51 +472,184 @@ export default function SlicerPanel() {
             >
               {showAdvanced
                 ? 'Hide Advanced Park Coordinates & Timing'
+                : triggerType === 'snap'
+                ? `Customize Snap & Timing (${config.captureTime}ms)`
                 : `Customize Park Coordinates & Timing (X${config.parkX} Y${config.parkY}, ${config.captureTime}ms)`}
             </button>
 
             {showAdvanced && (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(135px, 1fr))', gap: '10px', marginTop: '12px', padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px' }}>
-                <div>
-                  <label className="label" style={{ fontSize: '0.72rem' }}>Park Mode</label>
-                  <select className="input-field" value={triggerType} onChange={(e) => setTriggerType(e.target.value)} style={{ width: '100%', padding: '5px 8px', fontSize: '0.78rem' }}>
-                    <option value="park">Fixed Corner (X/Y)</option>
-                    <option value="snap">Snap to Print</option>
-                    <option value="snap-smooth">Smooth Snap</option>
-                  </select>
+              <div style={{ marginTop: '14px', padding: '16px', background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '10px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                {/* Printer Quick Presets */}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px', paddingBottom: '10px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', fontWeight: 600 }}>
+                      Printer Presets:
+                    </span>
+                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                      {PRINTER_PRESETS.map((p) => {
+                        const isMatch = config.parkX === p.x && config.parkY === p.y;
+                        return (
+                          <button
+                            key={p.name}
+                            type="button"
+                            disabled={triggerType !== 'park'}
+                            onClick={() => setConfig(prev => ({ ...prev, parkX: p.x, parkY: p.y }))}
+                            className={`btn btn-small ${isMatch && triggerType === 'park' ? 'btn-primary' : 'btn-secondary'}`}
+                            style={{ padding: '3px 9px', fontSize: '0.72rem', borderRadius: '5px' }}
+                            title={`${p.name} (${p.desc}) → X${p.x} Y${p.y}`}
+                          >
+                            {p.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                    {triggerType === 'park' ? `Target: X${config.parkX} Y${config.parkY}` : 'Park disabled (Snap mode)'}
+                  </span>
                 </div>
-                <div>
-                  <label className="label" style={{ fontSize: '0.72rem' }}>Signal</label>
-                  <select className="input-field" name="triggerSignal" value={config.triggerSignal} onChange={handleChange} style={{ width: '100%', padding: '5px 8px', fontSize: '0.78rem' }}>
-                    <option value="m220">M220 S99 (Speed)</option>
-                    <option value="m221">M221 S99 (Flow)</option>
-                    <option value="gpio0">M264 (GPIO)</option>
-                    <option value="serial">M118 (Serial)</option>
-                  </select>
+
+                {/* 4x2 Responsive Grid */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '12px' }}>
+                  <div>
+                    <label className="label">Park Mode</label>
+                    <select
+                      className="input-field"
+                      value={triggerType}
+                      onChange={(e) => setTriggerType(e.target.value)}
+                    >
+                      <option value="park">Fixed Corner (X/Y)</option>
+                      <option value="snap">Snap to Print (In-Place)</option>
+                      <option value="snap-smooth">Smooth Snap (File Drop)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="label">Trigger Signal</label>
+                    <select
+                      className="input-field"
+                      name="triggerSignal"
+                      value={config.triggerSignal}
+                      onChange={handleChange}
+                    >
+                      <option value="m220">M220 S99 (Print Speed — Rec.)</option>
+                      <option value="m221">M221 S99 (Flow Factor)</option>
+                      <option value="serial">M118 (Serial / UART)</option>
+                      <option value="gpio0">M264 (GPIO / Hackerboard)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="label">
+                      Park X (mm)
+                      {triggerType !== 'park' && <span style={{ opacity: 0.6, marginLeft: '4px' }}>(N/A)</span>}
+                    </label>
+                    <input
+                      type="number"
+                      className="input-field"
+                      name="parkX"
+                      value={config.parkX}
+                      disabled={triggerType !== 'park'}
+                      onChange={handleChange}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="label">
+                      Park Y (mm)
+                      {triggerType !== 'park' && <span style={{ opacity: 0.6, marginLeft: '4px' }}>(N/A)</span>}
+                    </label>
+                    <input
+                      type="number"
+                      className="input-field"
+                      name="parkY"
+                      value={config.parkY}
+                      disabled={triggerType !== 'park'}
+                      onChange={handleChange}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="label">Z-Hop (mm)</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="5"
+                      className="input-field"
+                      name="zHopHeight"
+                      value={config.zHopHeight}
+                      disabled={triggerType === 'snap'}
+                      onChange={handleChange}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="label" title="PrusaSlicer natively retracts before layer change. Keep at 0.0 to prevent double-retraction clogs on Nextruder.">
+                      Extra Retract (mm) <span style={{ fontSize: '0.68rem', color: '#2ecc71', fontWeight: 600 }}>[0.0 Rec.]</span>
+                    </label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="5"
+                      className="input-field"
+                      name="retractDistance"
+                      value={config.retractDistance}
+                      onChange={handleChange}
+                      placeholder="0.0 (Rec.)"
+                    />
+                    {config.retractDistance > 0 && (
+                      <div style={{ fontSize: '0.68rem', color: '#ff6b6b', marginTop: '4px', lineHeight: 1.25 }}>
+                        ⚠️ Warning: Setting retract causes double-retraction jams on Nextruder (MK4/MK3.9). Set to 0.0 mm.
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="label">Settle Time (ms)</label>
+                    <input
+                      type="number"
+                      step="50"
+                      min="0"
+                      max="3000"
+                      className="input-field"
+                      name="settleTime"
+                      value={config.settleTime}
+                      onChange={handleChange}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="label">Capture Wait (ms)</label>
+                    <input
+                      type="number"
+                      step="100"
+                      min="100"
+                      max="5000"
+                      className="input-field"
+                      name="captureTime"
+                      value={config.captureTime}
+                      onChange={handleChange}
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="label" style={{ fontSize: '0.72rem' }}>Park X (mm)</label>
-                  <input type="number" className="input-field" name="parkX" value={config.parkX} onChange={handleChange} style={{ padding: '5px 8px', fontSize: '0.78rem' }} />
-                </div>
-                <div>
-                  <label className="label" style={{ fontSize: '0.72rem' }}>Park Y (mm)</label>
-                  <input type="number" className="input-field" name="parkY" value={config.parkY} onChange={handleChange} style={{ padding: '5px 8px', fontSize: '0.78rem' }} />
-                </div>
-                <div>
-                  <label className="label" style={{ fontSize: '0.72rem' }}>Z-Hop (mm)</label>
-                  <input type="number" step="0.1" className="input-field" name="zHopHeight" value={config.zHopHeight} onChange={handleChange} style={{ padding: '5px 8px', fontSize: '0.78rem' }} />
-                </div>
-                <div>
-                  <label className="label" style={{ fontSize: '0.72rem' }}>Retract (mm)</label>
-                  <input type="number" step="0.1" className="input-field" name="retractDistance" value={config.retractDistance} onChange={handleChange} style={{ padding: '5px 8px', fontSize: '0.78rem' }} />
-                </div>
-                <div>
-                  <label className="label" style={{ fontSize: '0.72rem' }}>Settle (ms)</label>
-                  <input type="number" className="input-field" name="settleTime" value={config.settleTime} onChange={handleChange} style={{ padding: '5px 8px', fontSize: '0.78rem' }} />
-                </div>
-                <div>
-                  <label className="label" style={{ fontSize: '0.72rem' }}>Capture Wait (ms)</label>
-                  <input type="number" className="input-field" name="captureTime" value={config.captureTime} onChange={handleChange} style={{ padding: '5px 8px', fontSize: '0.78rem' }} />
+
+                {/* Explanatory Context Footer */}
+                <div style={{ fontSize: '0.73rem', color: 'var(--text-secondary)', lineHeight: 1.5, background: 'rgba(255,255,255,0.02)', padding: '8px 12px', borderRadius: '6px' }}>
+                  {triggerType === 'park' ? (
+                    <span>
+                      💡 <strong>Parked Mode:</strong> Lifts Z by {config.zHopHeight}mm, parks at <code>X{config.parkX} Y{config.parkY}</code>, and pauses {config.settleTime + config.captureTime}ms for capture. Relative extrusion (<code>M83</code>) is strictly locked so PrusaSlicer's native layer retractions and perimeters extrude 100% reliably.
+                    </span>
+                  ) : triggerType === 'snap' ? (
+                    <span>
+                      💡 <strong>Snap to Print:</strong> Nozzle dwells briefly at the exact end of each layer without moving to the corner. Preserves fast print times with zero travel overhead.
+                    </span>
+                  ) : (
+                    <span>
+                      💡 <strong>Smooth Snap:</strong> Applies algorithmic motion smoothing between layer points to create smooth panning. <em>Note: Generated through Option 2 (.gcode drop) above.</em>
+                    </span>
+                  )}
                 </div>
               </div>
             )}

@@ -16,13 +16,31 @@ export async function GET() {
 
 export async function POST(request) {
   try {
-    const config = await request.json();
+    const incoming = await request.json();
+    let existing = {};
+    try {
+      const raw = await fs.readFile(CONFIG_FILE, 'utf-8');
+      existing = JSON.parse(raw) || {};
+    } catch {}
+
+    const config = {
+      ...existing,
+      ...incoming,
+      cameraMacs: {
+        ...(existing.cameraMacs || {}),
+        ...(incoming.cameraMacs || {})
+      },
+      cameraNames: {
+        ...(existing.cameraNames || {}),
+        ...(incoming.cameraNames || {})
+      }
+    };
     await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2));
     
     // Log configuration changes
     monitor.log(`Configuration saved (Prusa IP: ${config.prusaIp || 'None'}, ${config.cameraIps ? config.cameraIps.length : 0} cameras)`, 'success');
     
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, config });
   } catch (error) {
     return NextResponse.json({ error: 'Failed to save config' }, { status: 500 });
   }

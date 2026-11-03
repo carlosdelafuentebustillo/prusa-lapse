@@ -188,7 +188,7 @@ function CalendarDayCell({ cDay, isToday, daySessions, selectedSessionId, setSel
                 title={pillTitle}
                 time={sObj?.time}
                 isSelected={selectedSessionId === sess.id}
-                onClick={() => setSelectedSessionId(prev => prev === sess.id ? null : sess.id)}
+                onClick={() => setSelectedSessionId(selectedSessionId === sess.id ? null : sess.id)}
               />
             );
           })}
@@ -282,13 +282,18 @@ const getSessionDisplayName = (session, dateObj) => {
 };
 
 export default function Home() {
-  const [config, setConfig] = useState({ prusaIp: '', prusaApiKey: '', cameraIps: '' });
+  const [config, setConfig] = useState({ prusaIp: '', prusaApiKey: '', cameraIps: '', cameraMacs: {}, cameraNames: {} });
   const [isMonitoring, setIsMonitoring] = useState(false);
   const [logs, setLogs] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [compilingStatus, setCompilingStatus] = useState(null);
   const [compileOptions, setCompileOptions] = useState({ fps: 30, quality: 23, filterDark: true });
-  const [cameraRotations, setCameraRotations] = useState({ 0: 0, 1: 90 });
+  const [cameraRotations, setCameraRotations] = useState({
+    camera_5C013B885234: 0,
+    camera_5C013B87D598: 90,
+    0: 0,
+    1: 90
+  });
   const [activeVideo, setActiveVideo] = useState(null);
   const [frameCount, setFrameCount] = useState(0);
   const [currentSession, setCurrentSession] = useState(null);
@@ -303,6 +308,7 @@ export default function Home() {
   const [isTesting, setIsTesting] = useState(false);
   const [fetchingSessionId, setFetchingSessionId] = useState(null);
   const [fetchStatus, setFetchStatus] = useState(null);
+  const isFetchRequestInFlightRef = useRef(false);
 
   const now = new Date();
   const [currentMonthDate, setCurrentMonthDate] = useState({ month: now.getMonth() + 1, year: now.getFullYear() });
@@ -442,16 +448,73 @@ export default function Home() {
 
   const getCameraVal = (ip, variable, defaultVal) => {
     const val = cameraSettings[ip]?.[variable];
-    return (val !== undefined && val !== null && val !== '') ? val : defaultVal;
+    if (val !== undefined && val !== null && val !== '') return val;
+    if (variable === 'camera_name') {
+      const mac = config.cameraMacs?.[ip]?.toUpperCase();
+      const persisted = (mac && config.cameraNames?.[mac]) || config.cameraNames?.[ip];
+      if (persisted) return persisted;
+    }
+    return defaultVal;
   };
 
-  const getCameraDisplayName = (idx) => {
+  const getCameraDisplayName = (camOrIdx) => {
     const ips = config.cameraIps ? config.cameraIps.split('\n').map(i => i.trim()).filter(Boolean) : [];
-    const ip = ips[idx];
-    if (ip && cameraSettings[ip]?.camera_name) {
+
+    if (typeof camOrIdx === 'number' || (typeof camOrIdx === 'string' && /^\d+$/.test(camOrIdx))) {
+      const idx = Number(camOrIdx);
+      const ip = ips[idx];
+      if (ip && cameraSettings[ip]?.camera_name && cameraSettings[ip].camera_name !== 'PrusaLapse Camera') {
+        return cameraSettings[ip].camera_name;
+      }
+      const mac = ip ? config.cameraMacs?.[ip]?.toUpperCase() : null;
+      const persisted = (mac && config.cameraNames?.[mac]) || (ip && config.cameraNames?.[ip]);
+      if (persisted) return persisted;
+      return `Camera ${idx + 1}`;
+    }
+
+    const obj = typeof camOrIdx === 'string' ? { name: camOrIdx } : (camOrIdx || {});
+    if (obj.displayName && !/^Camera \d+$/i.test(obj.displayName)) {
+      return obj.displayName;
+    }
+
+    const folderKey = obj.name || obj.folderName || '';
+    const suffix = folderKey.startsWith('camera_') ? folderKey.slice('camera_'.length) : folderKey;
+    const mac = (obj.mac || (/^[0-9A-Fa-f]{12}$/.test(suffix) ? suffix : null))?.toUpperCase() || null;
+
+    let ip = obj.ip || null;
+    if (!ip && mac && config.cameraMacs) {
+      ip = Object.entries(config.cameraMacs).find(([, m]) => String(m || '').toUpperCase() === mac)?.[0] || null;
+    }
+    if (!ip && /^\d+_\d+_\d+_\d+$/.test(suffix)) {
+      ip = suffix.replace(/_/g, '.');
+    }
+
+    if (ip && cameraSettings[ip]?.camera_name && cameraSettings[ip].camera_name !== 'PrusaLapse Camera') {
       return cameraSettings[ip].camera_name;
     }
-    return `Camera ${idx + 1}`;
+
+    if (mac) {
+      for (const [, st] of Object.entries(cameraSettings)) {
+        const stMac = (st?.mac || (st?.fingerprint && st.fingerprint.length >= 24 ? st.fingerprint.slice(0, 12) : '')).toUpperCase();
+        if (stMac === mac && st?.camera_name && st.camera_name !== 'PrusaLapse Camera') {
+          return st.camera_name;
+        }
+      }
+    }
+
+    if (obj.cameraName && obj.cameraName !== 'PrusaLapse Camera') {
+      return obj.cameraName;
+    }
+
+    const persisted = (mac && config.cameraNames?.[mac]) || (ip && config.cameraNames?.[ip]);
+    if (persisted) return persisted;
+
+    if (typeof obj.index === 'number') return getCameraDisplayName(obj.index);
+    if (typeof obj.cameraIndex === 'number' && obj.cameraIndex < 99) return getCameraDisplayName(obj.cameraIndex);
+    if (/^\d+$/.test(suffix)) return getCameraDisplayName(Number(suffix));
+    if (mac) return `Camera ${mac.slice(-4)}`;
+    if (ip) return `Camera (${ip})`;
+    return 'Camera';
   };
 
   const fetchCameraSettings = async (cameraIpsStr) => {
@@ -463,6 +526,7 @@ export default function Home() {
         const res = await fetch(`/api/camera/status?ip=${ip}`);
         if (res.ok) {
           const data = await res.json();
+          const derivedMac = (data.mac || (data.fingerprint && data.fingerprint.length >= 24 ? data.fingerprint.slice(0, 12) : '')).toUpperCase();
           setCameraSettings(prev => ({
             ...prev,
             [ip]: {
@@ -478,6 +542,7 @@ export default function Home() {
               prusa_connect_token: data.prusa_connect_token ?? '',
               prusa_connect_code: data.prusa_connect_code ?? 0,
               fingerprint: data.fingerprint ?? '',
+              mac: derivedMac || prev[ip]?.mac || '',
               camera_name: data.camera_name ?? 'PrusaLapse Camera',
               firmware_version: data.firmware_version ?? prev[ip]?.firmware_version,
             }
@@ -513,7 +578,9 @@ export default function Home() {
           setConfig({
             prusaIp: data.config.prusaIp || '',
             prusaApiKey: data.config.prusaApiKey || '',
-            cameraIps: cameraIpsStr
+            cameraIps: cameraIpsStr,
+            cameraMacs: data.config.cameraMacs || {},
+            cameraNames: data.config.cameraNames || {}
           });
           fetchCameraSettings(cameraIpsStr);
         }
@@ -543,7 +610,7 @@ export default function Home() {
   }, [config.cameraIps, isAnyPrinting]);
 
   const fetchSessions = (forceRemote = false) => {
-    fetch(`/api/sessions${forceRemote === true ? '?remote=true' : ''}`)
+    return fetch(`/api/sessions${forceRemote === true ? '?remote=true' : ''}`)
       .then(res => res.json())
       .then(data => {
         if (data.sessions) {
@@ -583,13 +650,6 @@ export default function Home() {
 
           const deduped = data.sessions.filter(s => {
             if (!s.isRemote) return true;
-            if (fetchStatus?.isFetching && (
-              fetchStatus.remoteSessionId === s.id ||
-              fetchStatus.sessionTimestamp === s.timestamp ||
-              (s.jobId && fetchStatus.jobId === s.jobId && sameStart(fetchStatus.sessionTimestamp, s.timestamp))
-            )) {
-              return false;
-            }
             if (s.timestamp && localTimestamps.has(s.timestamp)) return false;
             if (s.jobId && (localStartsByJobId.get(s.jobId) || []).some(ts => sameStart(ts, s.timestamp))) return false;
             if (s.remoteSessionIds && Object.entries(s.remoteSessionIds).some(([ip, sid]) => localRemoteIdsByIp.has(`${ip}:${sid}`))) {
@@ -600,7 +660,8 @@ export default function Home() {
 
           setSessions(deduped);
         }
-      });
+      })
+      .catch(() => {});
   };
 
   useEffect(() => {
@@ -615,11 +676,16 @@ export default function Home() {
             setIsMonitoring(data.isRunning);
           }
           if (data.fetchStatus !== undefined) {
-            setFetchStatus(data.fetchStatus);
-            if (data.fetchStatus?.isFetching && data.fetchStatus.remoteSessionId) {
-              setFetchingSessionId(data.fetchStatus.remoteSessionId);
-            } else if (!data.fetchStatus?.isFetching && fetchingSessionId) {
-              setFetchingSessionId(null);
+            if (data.fetchStatus?.isFetching) {
+              setFetchStatus(data.fetchStatus);
+              if (data.fetchStatus.remoteSessionId || data.fetchStatus.sessionId) {
+                setFetchingSessionId(data.fetchStatus.remoteSessionId || data.fetchStatus.sessionId);
+              }
+            } else if (!isFetchRequestInFlightRef.current) {
+              setFetchStatus(null);
+              if (fetchingSessionId) {
+                setFetchingSessionId(null);
+              }
             }
           }
         })
@@ -641,10 +707,13 @@ export default function Home() {
         .then(res => res.json())
         .then(data => {
           if (data.fetchStatus !== undefined) {
-            setFetchStatus(data.fetchStatus);
-            if (data.fetchStatus?.isFetching && data.fetchStatus.remoteSessionId) {
-              setFetchingSessionId(data.fetchStatus.remoteSessionId);
-            } else if (!data.fetchStatus?.isFetching) {
+            if (data.fetchStatus?.isFetching) {
+              setFetchStatus(data.fetchStatus);
+              if (data.fetchStatus.remoteSessionId || data.fetchStatus.sessionId) {
+                setFetchingSessionId(data.fetchStatus.remoteSessionId || data.fetchStatus.sessionId);
+              }
+            } else if (!isFetchRequestInFlightRef.current) {
+              setFetchStatus(null);
               setFetchingSessionId(null);
             }
           }
@@ -779,26 +848,29 @@ export default function Home() {
     }
   };
 
-  const handleCompile = async (sessionId, cameraIndex) => {
-    setCompilingStatus({ sessionId, cameraIndex });
-    const rotation = cameraRotations[cameraIndex] ?? (cameraIndex === 1 ? 90 : 0);
+  const handleCompile = async (sessionId, camKey, camLabel = null) => {
+    const folderName = (typeof camKey === 'string' && camKey.startsWith('camera_')) ? camKey : `camera_${camKey}`;
+    const label = camLabel || getCameraDisplayName(folderName);
+    setCompilingStatus({ sessionId, camera: folderName, cameraLabel: label });
+    const defaultRot = (folderName === 'camera_5C013B87D598' || label.toLowerCase().includes('x-axis')) ? 90 : 0;
+    const rotation = cameraRotations[folderName] ?? defaultRot;
     try {
       const res = await fetch('/api/compile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sessionId,
-          cameraIndex,
+          camera: folderName,
           options: { ...compileOptions, rotation }
         })
       });
       if (res.ok) {
         fetchSessions();
-        addToast(`Compiled video for ${getCameraDisplayName(cameraIndex)}!`, 'success');
+        addToast(`Compiled video for ${label}!`, 'success');
         setActiveVideo({
           session: sessionId,
-          camera: `camera_${cameraIndex}`,
-          cameraLabel: getCameraDisplayName(cameraIndex),
+          camera: folderName,
+          cameraLabel: label,
           timestamp: Date.now()
         });
       } else {
@@ -868,19 +940,18 @@ export default function Home() {
 
   const handleClearAllSessions = () => {
     showConfirm(
-      'Delete ALL local sessions and videos from this computer?',
+      'Delete ALL sessions and videos from this computer and wipe camera SD cards to start fresh?',
       async () => {
         try {
           const res = await fetch('/api/sessions/clear', { method: 'DELETE' });
-          if (res.ok) {
-            fetchSessions();
-            addToast('All local sessions cleared', 'success');
-            setActiveVideo(null);
-            setSelectedSessionId(null);
-          } else {
-            const err = await res.json();
-            addToast(`Failed: ${err.error}`, 'error');
-          }
+          try {
+            await fetch('/api/offline/wipe', { method: 'POST' });
+          } catch (e) {}
+          setSessions([]);
+          await fetchSessions(false);
+          addToast('All timelapse sessions and camera SD cards cleared', 'success');
+          setActiveVideo(null);
+          setSelectedSessionId(null);
         } catch (e) {
           addToast(`Failed: ${e.message}`, 'error');
         }
@@ -916,8 +987,39 @@ export default function Home() {
       addToast('Please stop Live Sync first.', 'warning');
       return;
     }
+    if (isFetchRequestInFlightRef.current || fetchStatus?.isFetching) {
+      return;
+    }
+
+    const remoteFrameCountsPayload = session.remoteFrameCounts || (session.cameras ? Object.fromEntries(session.cameras.filter(c => c.ip).map(c => [c.ip, c.frameCount])) : null);
+    const initialExpected = session.totalFramesExpected ?? (remoteFrameCountsPayload ? Object.values(remoteFrameCountsPayload).reduce((a, b) => a + (Number(b) || 0), 0) : 0);
+    const initialFetched = session.totalFramesLocal ?? (session.isRemote ? 0 : (session.cameras || []).reduce((sum, c) => sum + (c.frameCount || 0), 0));
+    const initialPct = initialExpected > 0 ? Math.min(99, Math.round((initialFetched / initialExpected) * 100)) : 0;
+    const targetLocalSessionId = session.timestamp ? `session_${session.timestamp}` : session.id;
+
+    isFetchRequestInFlightRef.current = true;
     setFetchingSessionId(session.id);
+    setFetchStatus({
+      isFetching: true,
+      sessionId: targetLocalSessionId,
+      remoteSessionId: session.id,
+      sessionTimestamp: session.timestamp || null,
+      jobName: session.jobName || session.meta?.displayName || null,
+      jobId: session.jobId || session.meta?.jobId || null,
+      targetSessionIds: session.remoteSessionIds || null,
+      remoteFrameCounts: remoteFrameCountsPayload,
+      overallProgress: initialPct,
+      progress: initialPct,
+      totalFramesExpected: initialExpected,
+      totalFramesFetched: initialFetched,
+      cameras: []
+    });
     addToast('Syncing session from camera SD cards...', 'info');
+
+    const earlyRefreshTimer = setTimeout(() => {
+      fetchSessions(false);
+    }, 600);
+
     try {
       const res = await fetch('/api/offline/fetch', {
         method: 'POST',
@@ -925,24 +1027,30 @@ export default function Home() {
         body: JSON.stringify({
           remoteSessionId: session.id,
           targetSessionIds: session.remoteSessionIds,
-          remoteFrameCounts: session.remoteFrameCounts || (session.cameras ? Object.fromEntries(session.cameras.filter(c => c.ip).map(c => [c.ip, c.frameCount])) : null),
+          remoteFrameCounts: remoteFrameCountsPayload,
           sessionTimestamp: session.timestamp,
           jobName: session.jobName || session.meta?.displayName || null,
           jobId: session.jobId || session.meta?.jobId || null
         })
       });
+      clearTimeout(earlyRefreshTimer);
       if (res.ok) {
+        await fetchSessions(false);
         addToast('Session synced from SD card!', 'success');
         fetchSessions(true);
       } else {
         const err = await res.json();
+        await fetchSessions(false);
         addToast(`Sync failed: ${err.error}`, 'error');
         fetchSessions(true);
       }
     } catch (e) {
+      clearTimeout(earlyRefreshTimer);
       addToast(`Sync failed: ${e.message}`, 'error');
     } finally {
+      isFetchRequestInFlightRef.current = false;
       setFetchingSessionId(null);
+      setFetchStatus(null);
     }
   };
 
@@ -1014,12 +1122,16 @@ export default function Home() {
     const parsed = parsePrusaFilenameClient(activeJobName);
     const activeCameras = Object.entries(cameraSettings)
       .filter(([_, c]) => c && (c.sensor_ok || (c.frame_count && c.frame_count > 0) || c.printer_state))
-      .map(([ip, c], idx) => ({
-        name: `camera_${idx}`,
-        displayName: c.camera_name || `Camera ${idx + 1}`,
-        frameCount: c.frame_count || 0,
-        ip
-      }));
+      .map(([ip, c], idx) => {
+        const mac = (c.mac || (c.fingerprint && c.fingerprint.length >= 24 ? c.fingerprint.slice(0, 12) : '') || config.cameraMacs?.[ip] || '').toUpperCase();
+        return {
+          name: mac ? `camera_${mac}` : `camera_${idx}`,
+          mac: mac || null,
+          displayName: c.camera_name || config.cameraNames?.[mac] || config.cameraNames?.[ip] || `Camera ${idx + 1}`,
+          frameCount: c.frame_count || 0,
+          ip
+        };
+      });
     const totalFramesAcrossCameras = activeCameras.reduce((sum, c) => sum + (c.frameCount || 0), 0);
     const now = new Date();
     const activeTimestamp = generateSessionTimestamp(now);
@@ -1063,6 +1175,37 @@ export default function Home() {
     return list;
   })();
 
+  const resolveSelectedSession = (list, selectedId) => {
+    if (!selectedId || !list || list.length === 0) return null;
+    const exact = list.find(s => s.id === selectedId);
+    if (exact) return exact;
+
+    if (selectedId.startsWith('remote_')) {
+      const withoutPrefix = selectedId.slice('remote_'.length);
+      const ts = withoutPrefix.slice(0, 15);
+      const remSid = withoutPrefix.length > 16 ? withoutPrefix.slice(16) : null;
+      const byLocal = list.find(s =>
+        s.id === `session_${ts}` ||
+        s.timestamp === ts ||
+        (remSid && s.remoteSessionIds && Object.values(s.remoteSessionIds).includes(remSid))
+      );
+      if (byLocal) return byLocal;
+    }
+
+    if (fetchStatus && (fetchStatus.remoteSessionId === selectedId || fetchStatus.sessionId === selectedId)) {
+      const byFetch = list.find(s =>
+        s.id === fetchStatus.sessionId ||
+        s.id === fetchStatus.remoteSessionId ||
+        (fetchStatus.sessionTimestamp && s.timestamp === fetchStatus.sessionTimestamp)
+      );
+      if (byFetch) return byFetch;
+    }
+
+    return null;
+  };
+
+  const selectedSession = resolveSelectedSession(displaySessions, selectedSessionId);
+
   const renderSessionCard = (session) => {
     const dateObj = parseSessionDate(session.timestamp);
     const title = getSessionDisplayName(session, dateObj);
@@ -1075,7 +1218,13 @@ export default function Home() {
     const hasJobConflict = session.jobId && fetchStatus?.jobId && session.jobId !== fetchStatus.jobId;
     const isCurrentFetching = Boolean(
       !session.isActive && !hasJobConflict && (
-        (fetchingSessionId && fetchingSessionId === session.id) ||
+        (fetchingSessionId && (
+          fetchingSessionId === session.id ||
+          (session.timestamp && (
+            fetchingSessionId === `session_${session.timestamp}` ||
+            fetchingSessionId.startsWith(`remote_${session.timestamp}`)
+          ))
+        )) ||
         (fetchStatus?.isFetching && (
           fetchStatus.remoteSessionId === session.id ||
           fetchStatus.sessionId === session.id ||
@@ -1090,7 +1239,7 @@ export default function Home() {
     const displayExpected = isCurrentFetching ? (fetchStatus?.totalFramesExpected || totalFramesExpected) : totalFramesExpected;
 
     return (
-      <div key={session.id} className="session-card" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '14px', background: 'rgba(255,255,255,0.02)' }}>
+      <div key={session.timestamp || session.id} className="session-card" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '14px', background: 'rgba(255,255,255,0.02)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
           {/* Left: Thumbnail + Print Name + Date/Tags */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', minWidth: 0, flex: 1 }}>
@@ -1263,11 +1412,11 @@ export default function Home() {
             {/* Right: Button */}
             {!session.isActive && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                {displayPercent < 100 ? (
+                {(isCurrentFetching || displayPercent < 100) ? (
                   <button
-                    className={`btn btn-small ${totalFramesLocal > 0 ? 'btn-secondary' : 'btn-primary'}`}
+                    className={`btn btn-small ${totalFramesLocal > 0 && !isCurrentFetching ? 'btn-secondary' : 'btn-primary'}`}
                     style={{ width: 'auto', padding: '5px 12px', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
-                    disabled={isMonitoring || (fetchStatus?.isFetching && !isCurrentFetching) || (fetchingSessionId !== null && !isCurrentFetching)}
+                    disabled={isMonitoring || isCurrentFetching || Boolean(fetchStatus?.isFetching) || fetchingSessionId !== null}
                     onClick={() => handleFetchOffline(session)}
                     title={totalFramesLocal > 0 ? 'Resume downloading missing frames from SD card' : 'Sync session frames from camera SD card'}
                   >
@@ -1310,11 +1459,11 @@ export default function Home() {
           )}
 
           {/* Sub-status: Active multi-camera sync progress details */}
-          {!session.isActive && isCurrentFetching && fetchStatus?.cameras && fetchStatus.cameras.length > 1 && (
+          {!session.isActive && isCurrentFetching && fetchStatus?.cameras && fetchStatus.cameras.filter(c => c.status !== 'skipped').length > 0 && (
             <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', paddingTop: '6px', borderTop: '1px solid rgba(255,255,255,0.05)', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
-              {fetchStatus.cameras.map((c, idx) => (
-                <span key={idx} style={{ opacity: c.status === 'done' ? 0.8 : 1, color: c.status === 'error' ? '#ff6b6b' : 'inherit' }}>
-                  {getCameraDisplayName(idx)}: {c.fetched}/{c.expected} {c.status === 'done' ? '✓' : (c.status === 'error' ? '⚠ offline' : '')}
+              {fetchStatus.cameras.filter(c => c.status !== 'skipped').map((c, idx) => (
+                <span key={c.folderName || c.ip || idx} style={{ opacity: c.status === 'done' ? 0.8 : 1, color: c.status === 'error' ? '#ff6b6b' : 'inherit' }}>
+                  {getCameraDisplayName(c)}: {c.fetched}/{c.expected} {c.status === 'done' ? '✓' : (c.status === 'error' ? '⚠ offline' : '')}
                 </span>
               ))}
             </div>
@@ -1325,13 +1474,14 @@ export default function Home() {
         {totalFramesLocal > 0 ? (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '10px' }}>
             {session.cameras.map((cam, idx) => {
-              const camIndex = cam.cameraIndex ?? (typeof cam.name === 'string' && cam.name.startsWith('camera_') ? parseInt(cam.name.replace('camera_', ''), 10) : idx);
-              const hasVideo = session.videos.includes(`camera_${camIndex}.mp4`);
-              const isThisCompiling = compilingStatus?.sessionId === session.id && compilingStatus?.cameraIndex === camIndex;
-              const camLabel = getCameraDisplayName(camIndex);
+              const camKey = cam.name || `camera_${idx}`;
+              const hasVideo = session.videos.includes(`${camKey}.mp4`);
+              const isThisCompiling = compilingStatus?.sessionId === session.id && compilingStatus?.camera === camKey;
+              const camLabel = getCameraDisplayName(cam);
+              const defaultRot = (camKey === 'camera_5C013B87D598' || camLabel.toLowerCase().includes('x-axis')) ? 90 : 0;
 
               return (
-                <div key={cam.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', padding: '8px 12px', background: 'rgba(0,0,0,0.25)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                <div key={camKey} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', padding: '8px 12px', background: 'rgba(0,0,0,0.25)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)' }}>
                   <div style={{ fontSize: '0.8rem' }}>
                     <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{camLabel}</div>
                     <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>{cam.frameCount} frames</div>
@@ -1341,8 +1491,8 @@ export default function Home() {
                     <select
                       className="input-field"
                       style={{ width: 'auto', padding: '4px 6px', fontSize: '0.72rem' }}
-                      value={cameraRotations[camIndex] ?? (camIndex === 1 ? 90 : 0)}
-                      onChange={(e) => setCameraRotations(prev => ({ ...prev, [camIndex]: parseInt(e.target.value, 10) }))}
+                      value={cameraRotations[camKey] ?? defaultRot}
+                      onChange={(e) => setCameraRotations(prev => ({ ...prev, [camKey]: parseInt(e.target.value, 10) }))}
                       title="Video Rotation"
                     >
                       <option value="0">0°</option>
@@ -1355,7 +1505,7 @@ export default function Home() {
                       <button
                         className="btn btn-primary btn-small"
                         style={{ width: 'auto', padding: '5px 10px', fontSize: '0.75rem' }}
-                        onClick={() => setActiveVideo({ session: session.id, title, camera: `camera_${camIndex}`, cameraLabel: camLabel, timestamp: Date.now() })}
+                        onClick={() => setActiveVideo({ session: session.id, title, camera: camKey, cameraLabel: camLabel, timestamp: Date.now() })}
                       >
                         Play
                       </button>
@@ -1365,14 +1515,14 @@ export default function Home() {
                       className={`btn btn-small ${hasVideo ? 'btn-ghost' : 'btn-secondary'}`}
                       style={{ width: 'auto', padding: '5px 10px', fontSize: '0.75rem' }}
                       disabled={cam.frameCount === 0 || isThisCompiling || !!compilingStatus}
-                      onClick={() => handleCompile(session.id, camIndex)}
+                      onClick={() => handleCompile(session.id, camKey, camLabel)}
                     >
                       {isThisCompiling ? 'Compiling…' : hasVideo ? 'Re-compile' : 'Compile MP4'}
                     </button>
 
                     {hasVideo && (
                       <a
-                        href={`/api/captures?session=${session.id}&file=camera_${camIndex}.mp4&t=${Date.now()}`}
+                        href={`/api/captures?session=${session.id}&file=${camKey}.mp4&t=${Date.now()}`}
                         download={`${title.replace(/[^a-z0-9-_]+/gi, '_')}_${camLabel}.mp4`}
                         className="btn btn-ghost btn-small"
                         style={{ width: 'auto', padding: '5px 8px', textDecoration: 'none', fontSize: '0.75rem' }}
@@ -1383,7 +1533,7 @@ export default function Home() {
                     )}
 
                     <a
-                      href={`/api/captures/zip?session=${session.id}&camera=camera_${camIndex}`}
+                      href={`/api/captures/zip?session=${session.id}&camera=${camKey}`}
                       className="btn btn-ghost btn-small"
                       style={{ width: 'auto', padding: '5px 8px', textDecoration: 'none', fontSize: '0.75rem', pointerEvents: cam.frameCount === 0 ? 'none' : 'auto', opacity: cam.frameCount === 0 ? 0.4 : 1 }}
                       title="Download RAW Frames ZIP"
@@ -1512,7 +1662,7 @@ export default function Home() {
           {compilingStatus && (
             <div className="compiler-status-box">
               <span className="spinner" />
-              Compiling {getCameraDisplayName(compilingStatus.cameraIndex)} into MP4…
+              Compiling {compilingStatus.cameraLabel || getCameraDisplayName(compilingStatus.camera)} into MP4…
             </div>
           )}
 
@@ -1543,7 +1693,7 @@ export default function Home() {
             </div>
           ) : (
             <>
-              {selectedSessionId && displaySessions.find(s => s.id === selectedSessionId) && (
+              {selectedSession && (
                 <div style={{ marginBottom: '16px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                     <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
@@ -1557,7 +1707,7 @@ export default function Home() {
                       ✕ Close Details
                     </button>
                   </div>
-                  {renderSessionCard(displaySessions.find(s => s.id === selectedSessionId))}
+                  {renderSessionCard(selectedSession)}
                 </div>
               )}
 
@@ -1584,7 +1734,7 @@ export default function Home() {
                       cDay={cDay}
                       isToday={isToday}
                       daySessions={daySessions}
-                      selectedSessionId={selectedSessionId}
+                      selectedSessionId={selectedSession?.id ?? selectedSessionId}
                       setSelectedSessionId={setSelectedSessionId}
                       getSessionDisplayName={getSessionDisplayName}
                     />

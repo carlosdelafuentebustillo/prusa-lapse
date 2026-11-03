@@ -21,8 +21,20 @@ String prusaConnectFingerprint = "";
 int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
-#define VERSION_MINOR 11
-#define FIRMWARE_VERSION "v1.2.9"
+#define VERSION_MINOR 15
+#define FIRMWARE_VERSION "v1.2.15"
+
+String deviceMacHex = "";
+String getDeviceMacHex() {
+  if (deviceMacHex.length() == 12) return deviceMacHex;
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  char macBuf[16];
+  snprintf(macBuf, sizeof(macBuf), "%02X%02X%02X%02X%02X%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  deviceMacHex = String(macBuf);
+  return deviceMacHex;
+}
 
 bool offlineMode = false;
 bool sdCardAvailable = false;
@@ -321,11 +333,8 @@ private:
   uint8_t *_buffer;
 public:
   AsyncBufferResponse(int code, const String& contentType, uint8_t *content, size_t len)
-    : AsyncProgmemResponse(code, contentType.c_str(), content, len, nullptr), _buffer(content) {
-    last_sd_download_time = millis();
-  }
+    : AsyncProgmemResponse(code, contentType.c_str(), content, len, nullptr), _buffer(content) {}
   virtual ~AsyncBufferResponse() override {
-    last_sd_download_time = millis();
     if (_buffer) {
       free(_buffer);
       _buffer = nullptr;
@@ -344,6 +353,8 @@ size_t snapshot_len = 0;
 
 // ==========================================
 volatile bool capture_in_progress = false;
+volatile bool pendingLayerCapture = false;
+void triggerCapture();
 
 // HQ Timelapse Capture (UXGA) — triggered by PrusaLink Z-change or M220 S99
 void captureTask(void *pvParameters) {
@@ -413,6 +424,10 @@ void captureTask(void *pvParameters) {
         }
         xSemaphoreGive(camera_mutex);
         capture_in_progress = false;
+        if (pendingLayerCapture && !sd_write_in_progress) {
+          pendingLayerCapture = false;
+          xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
+        }
         vTaskDelete(NULL);
         return;
       }
@@ -457,7 +472,21 @@ void captureTask(void *pvParameters) {
     }
     
     capture_in_progress = false;
+    if (pendingLayerCapture && !sd_write_in_progress) {
+      pendingLayerCapture = false;
+      xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
+    }
     vTaskDelete(NULL);
+}
+
+void triggerCapture() {
+  if (!capture_in_progress && !sd_write_in_progress) {
+    pendingLayerCapture = false;
+    xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
+  } else {
+    pendingLayerCapture = true;
+    Serial.println("Trigger queued: camera or SD writer busy, frame will capture immediately upon buffer release.");
+  }
 }
 
 void takePreviewSnapshot() {
@@ -965,6 +994,12 @@ void sdWriteTask(void *pvParameters) {
       }
       
       sd_write_in_progress = false;
+      if (pendingLayerCapture) {
+        pendingLayerCapture = false;
+        if (!capture_in_progress) {
+          xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
+        }
+      }
     }
   }
 }
@@ -1043,10 +1078,11 @@ void appendSessionRecord(int sess, int frames, String ts, int jobId, String jobN
   if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
   File jsonFile = SD_MMC.open("/lapse/sessions.jsonl", FILE_APPEND);
   if (jsonFile) {
+    String macStr = getDeviceMacHex();
     if (ts != "") {
-      jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"timestamp\":\"%s\",\"job_id\":%d,\"job_name\":\"%s\"}\n", sess, frames, ts.c_str(), jobId, jobName.c_str());
+      jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"timestamp\":\"%s\",\"job_id\":%d,\"job_name\":\"%s\",\"mac\":\"%s\",\"camera_name\":\"%s\"}\n", sess, frames, ts.c_str(), jobId, jobName.c_str(), macStr.c_str(), cameraName.c_str());
     } else {
-      jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"job_id\":%d,\"job_name\":\"%s\"}\n", sess, frames, jobId, jobName.c_str());
+      jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"job_id\":%d,\"job_name\":\"%s\",\"mac\":\"%s\",\"camera_name\":\"%s\"}\n", sess, frames, jobId, jobName.c_str(), macStr.c_str(), cameraName.c_str());
     }
     jsonFile.close();
     if (sd_mutex) xSemaphoreGive(sd_mutex);
@@ -1422,9 +1458,10 @@ void setupWebServer() {
       tokenMasked = "****";
     }
 
-    char json[768];
+    String macStr = getDeviceMacHex();
+    char json[832];
     snprintf(json, sizeof(json), 
-      "{\"brightness\":%d,\"contrast\":%d,\"hmirror\":%d,\"vflip\":%d,\"led\":%d,\"sd_available\":%d,\"offline_mode\":%d,\"prusa_connect_token\":\"%s\",\"prusa_connect_configured\":%d,\"prusa_connect_code\":%d,\"fingerprint\":\"%s\",\"camera_name\":\"%s\",\"firmware_version\":\"%s\",\"sensor_ok\":%d}",
+      "{\"brightness\":%d,\"contrast\":%d,\"hmirror\":%d,\"vflip\":%d,\"led\":%d,\"sd_available\":%d,\"offline_mode\":%d,\"prusa_connect_token\":\"%s\",\"prusa_connect_configured\":%d,\"prusa_connect_code\":%d,\"fingerprint\":\"%s\",\"mac\":\"%s\",\"camera_name\":\"%s\",\"firmware_version\":\"%s\",\"sensor_ok\":%d}",
       s ? s->status.brightness : brightnessVal,
       s ? s->status.contrast : contrastVal,
       s ? s->status.hmirror : hmirrorVal,
@@ -1436,6 +1473,7 @@ void setupWebServer() {
       prusaConnectToken.length() > 0 ? 1 : 0,
       last_prusa_connect_code,
       prusaConnectFingerprint.c_str(),
+      macStr.c_str(),
       cameraName.c_str(),
       FIRMWARE_VERSION,
       s ? 1 : 0
@@ -1585,6 +1623,7 @@ void setupWebServer() {
     json += "\"last_prusa_connect_code\":" + String(last_prusa_connect_code) + ",";
     json += "\"prusa_connect_info_sent\":" + String(prusaConnectInfoSent ? 1 : 0) + ",";
     json += "\"fingerprint\":\"" + prusaConnectFingerprint + "\",";
+    json += "\"mac\":\"" + getDeviceMacHex() + "\",";
     json += "\"last_z\":" + String(currentZValue) + ",";
     json += "\"max_z\":" + String(maxConfirmedZ) + ",";
     json += "\"trigger_mode\":\"" + activeTriggerMode + "\",";
@@ -1640,11 +1679,11 @@ void setupWebServer() {
           bool isDir = false;
           String filepath = dir.getNextFileName(&isDir);
           while (filepath.length() > 0) {
-            if (!isDir && (filepath.indexOf(sess + "_") != -1 || filepath.endsWith("/" + sess + ".tar"))) {
-              if (!filepath.startsWith("/")) filepath = "/" + filepath;
-              if (!filepath.startsWith("/lapse/")) filepath = "/lapse/" + filepath;
-              SD_MMC.remove(filepath);
-              vTaskDelay(pdMS_TO_TICKS(2));
+            int lastSlash = filepath.lastIndexOf('/');
+            String filename = (lastSlash != -1) ? filepath.substring(lastSlash + 1) : filepath;
+            if (!isDir && (filename.startsWith(sess + "_") || filename.endsWith(sess + ".tar"))) {
+              SD_MMC.remove("/lapse/" + filename);
+              vTaskDelay(pdMS_TO_TICKS(1));
             }
             filepath = dir.getNextFileName(&isDir);
           }
@@ -1672,26 +1711,44 @@ void setupWebServer() {
       xSemaphoreGive(sd_mutex);
     }
 
-    // Delete all files in /lapse asynchronously in a background task so AsyncTCP never times out
+    // Delete all files in /lapse asynchronously in repeated batches so all files are deleted cleanly
     xTaskCreatePinnedToCore([](void *param) {
-      if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
-      File dir = SD_MMC.open("/lapse");
-      if (dir) {
+      int deletedTotal = 0;
+      bool moreFiles = true;
+      while (moreFiles) {
+        if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
+        File dir = SD_MMC.open("/lapse");
+        if (!dir) {
+          if (sd_mutex) xSemaphoreGive(sd_mutex);
+          break;
+        }
+        int deletedInBatch = 0;
         bool isDir = false;
         String filepath = dir.getNextFileName(&isDir);
-        while (filepath.length() > 0) {
-          if (!isDir) {
-            if (!filepath.startsWith("/")) filepath = "/" + filepath;
-            if (!filepath.startsWith("/lapse/")) filepath = "/lapse/" + filepath;
-            SD_MMC.remove(filepath);
-            vTaskDelay(pdMS_TO_TICKS(2));
+        while (filepath.length() > 0 && deletedInBatch < 100) {
+          int lastSlash = filepath.lastIndexOf('/');
+          String filename = (lastSlash != -1) ? filepath.substring(lastSlash + 1) : filepath;
+          String fullPath = "/lapse/" + filename;
+          if (isDir) {
+            SD_MMC.rmdir(fullPath.c_str());
+          } else {
+            if (SD_MMC.remove(fullPath.c_str())) {
+              deletedTotal++;
+              deletedInBatch++;
+            }
           }
           filepath = dir.getNextFileName(&isDir);
         }
         dir.close();
+        if (sd_mutex) xSemaphoreGive(sd_mutex);
+
+        // If no files were removed in this pass, all entries are gone or non-removable
+        if (deletedInBatch == 0) {
+          moreFiles = false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(15)); // Yield to network and other tasks
       }
-      if (sd_mutex) xSemaphoreGive(sd_mutex);
-      Serial.println("Background Task: SD Card /lapse wipe complete");
+      Serial.printf("Background Task: SD Card /lapse wipe complete (%d files deleted)\n", deletedTotal);
       vTaskDelete(NULL);
     }, "wipeSdTask", 8192, NULL, 1, NULL, 1);
 
@@ -1923,11 +1980,13 @@ void setup() {
         prusaIp.trim();
         prusaApiKey.trim();
         
+        WiFiClient client;
+        client.setTimeout(2); // 2-second TCP timeout prevents indefinite FreeRTOS task hangs
         HTTPClient http;
         http.setReuse(false);
-        http.setTimeout(2500);
+        http.setTimeout(2500); // 2.5-second stream timeout
         
-        http.begin("http://" + prusaIp + "/api/v1/status");
+        http.begin(client, "http://" + prusaIp + "/api/v1/status");
         http.addHeader("X-Api-Key", prusaApiKey);
         const char* headers[] = {"Date"};
         http.collectHeaders(headers, 1);
@@ -1959,11 +2018,16 @@ void setup() {
             }
           }
           
-          // Adjust polling interval dynamically based on printer state
+          // Adjust polling interval dynamically based on printer state:
+          // Paced 400ms - 550ms polling with MAC jitter guarantees 2-3 status checks
+          // during any parked dwell window (1200ms - 1500ms), ensuring 100% trigger capture
+          // while maintaining gentle socket rotation on the Prusa Buddy board.
           if (state == "PRINTING") {
-            pollInterval = 300; // Poll fast during prints to catch M220 S99
+            uint8_t mac[6];
+            esp_read_mac(mac, ESP_MAC_WIFI_STA);
+            pollInterval = 400 + ((mac[4] ^ mac[5]) % 4) * 50;
           } else {
-            pollInterval = 2000; // Throttled poll when idle, paused, or finished
+            pollInterval = 3000; // Throttled poll when idle, paused, or finished
           }
 
           int zIdx = payload.indexOf("\"axis_z\":");
@@ -2146,28 +2210,46 @@ void setup() {
           // 2. Smart Z-Height Trigger (Automatic zero-G-code fallback)
           // =========================================================
           static bool trigger_active = false;
+          static uint32_t lastGcodeTriggerMs = 0;
+          static float lastGcodeTriggerZ = 0.0f;
           bool isParkedTriggerSignal = (current_speed == 99 || current_flow == 99);
 
           if (state == "PRINTING" && isParkedTriggerSignal) {
             gcodeTriggerUsedInJob = true;
             activeTriggerMode = "gcode";
+            lastGcodeTriggerMs = millis();
+            lastGcodeTriggerZ = axis_z;
             if (!trigger_active) {
               trigger_active = true;
               Serial.printf("PrusaLink Polling: G-CODE TRIGGER (Speed=%d%%, Flow=%d%%) detected! Capturing layer...\n", current_speed, current_flow);
-              if (!capture_in_progress && !sd_write_in_progress) {
-                xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
-              }
+              triggerCapture();
             }
           } else {
             if (!isParkedTriggerSignal) {
               trigger_active = false;
             }
 
-            // Smart Z-Height Fallback (when no M220/M221 S99 is used in this print job)
+            // Fallback recovery: if G-code was used earlier but triggers stopped
+            // (user removed custom G-code, or print moved > 0.6mm or 120s without a trigger),
+            // seamlessly revert back to Smart Z so layers are never lost!
+            if (gcodeTriggerUsedInJob && state == "PRINTING" && axis_z > 0.0f) {
+              bool gcodeTimedOut = (lastGcodeTriggerMs > 0 && (millis() - lastGcodeTriggerMs > 120000));
+              bool gcodeZClimbed = (lastGcodeTriggerZ > 0.0f && (axis_z - lastGcodeTriggerZ > 0.60f));
+              if (gcodeTimedOut || gcodeZClimbed) {
+                Serial.printf("PrusaLink Polling: G-code triggers stopped (timeout=%d, deltaZ=%.2fmm). Falling back to Smart Z!\n",
+                              gcodeTimedOut ? 1 : 0, axis_z - lastGcodeTriggerZ);
+                gcodeTriggerUsedInJob = false;
+                activeTriggerMode = "smart_z";
+                maxConfirmedZ = axis_z;
+              }
+            }
+
+            // Smart Z-Height Fallback (when no M220/M221 S99 is actively controlling captures)
             if (state == "PRINTING" && !gcodeTriggerUsedInJob && axis_z >= 0.10f && axis_z <= 250.0f) {
-              // Thermal guard: ignore Z movements during MBL / pre-heating before nozzle reaches printing temp
-              // (If target_nozzle < 0, telemetry omitted temp fields e.g. mock test, so allow it)
-              bool nozzleReady = (target_nozzle < 0.0f) || (target_nozzle >= 170.0f && temp_nozzle >= (target_nozzle - 4.0f));
+              // Thermal & probing guard: Nextruder (MK4/MK3.9) preheats to 170°C exclusively for loadcell MBL probing.
+              // Ignore all Z moves during probing before actual printing temperature (>185°C) or print progress starts.
+              bool isMBLProbing = (target_nozzle > 0.0f && target_nozzle <= 175.0f && currentJobProgress < 0.5f);
+              bool nozzleReady = !isMBLProbing && ((target_nozzle < 0.0f) || (target_nozzle >= 185.0f && temp_nozzle >= (target_nozzle - 5.0f)) || (currentJobProgress >= 0.5f));
 
               if (nozzleReady) {
                 if (prevPollZ >= 0.0f && fabs(axis_z - prevPollZ) < 0.015f) {
@@ -2177,33 +2259,52 @@ void setup() {
                   zStableCount = 1;
                 }
 
-                if (maxConfirmedZ < 0.0f || (axis_z < maxConfirmedZ - 0.30f && zStableCount >= 3)) {
-                  // Initialize baseline Z once stable at first layer (or re-lock after pre-print Z=4mm/15mm park drop)
-                  if (zStableCount >= 3) {
-                    if (!capture_in_progress && !sd_write_in_progress) {
-                      maxConfirmedZ = axis_z;
-                      activeTriggerMode = "smart_z";
-                      Serial.printf("PrusaLink Polling: SMART Z baseline locked at Z=%.2fmm. Capturing initial layer...\n", axis_z);
-                      xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
-                    }
+                // 1. Unconditional Downward Drop Recovery:
+                // Start G-code lifts toolhead high during preheat (e.g. Z=40mm or Z=15mm).
+                // When nozzle drops down to bed level (Z <= 1.5mm), immediately force-reset maxConfirmedZ
+                // so the preheat hover NEVER locks out layer triggers!
+                if (maxConfirmedZ > 2.0f && axis_z <= 1.50f && zStableCount >= 2) {
+                  maxConfirmedZ = axis_z;
+                  activeTriggerMode = "smart_z";
+                  Serial.printf("PrusaLink Polling: Bed drop detected from preheat hover. Smart Z baseline reset to Z=%.2fmm\n", axis_z);
+                  triggerCapture();
+                }
+                // 2. Baseline Initialization (fresh print OR mid-print boot recovery):
+                // For a starting print (job_progress < 3%), require axis_z <= 1.50mm to reject Z=40mm preheat hovers.
+                // For a mid-print camera reboot (job_progress >= 3%), lock to current Z with 2 stable polls (~0.6s).
+                else if (maxConfirmedZ < 0.0f) {
+                  bool canInitBaseline = (axis_z <= 1.50f && zStableCount >= 2) || 
+                                         (currentJobProgress >= 3.0f && zStableCount >= 2) ||
+                                         (zStableCount >= 2 && axis_z < 35.0f);
+                  if (canInitBaseline) {
+                    maxConfirmedZ = axis_z;
+                    activeTriggerMode = "smart_z";
+                    Serial.printf("PrusaLink Polling: SMART Z baseline locked at Z=%.2fmm (progress=%.1f%%). Capturing layer...\n", axis_z, currentJobProgress);
+                    triggerCapture();
                   }
-                } else {
+                }
+                // 3. Normal Layer Step Tracking:
+                else {
                   float deltaZ = axis_z - maxConfirmedZ;
-                  // Standard layer step (0.04mm - 0.24mm): confirm after 3 consecutive stable polls (~0.9s)
-                  // Larger step (0.24mm - 0.60mm, e.g. 0.30mm Z-hop vs 0.30mm thick layer): require 6 stable polls (~1.8s) to reject travel Z-hops
-                  bool confirmedNormalLayer = (deltaZ >= 0.04f && deltaZ <= 0.24f && zStableCount >= 3);
-                  bool confirmedThickLayer  = (deltaZ > 0.24f && deltaZ <= 0.60f && zStableCount >= 6);
-                  // Resynchronization fallback: if intermediate layers were missed (deltaZ > 0.60mm) and Z is stable for >= 6 polls (~1.8s),
-                  // or if Z is stable for >= 10 polls (~3.0s) at any higher Z, this is definitely a valid print layer, NOT a transient travel Z-hop!
-                  bool confirmedResyncLayer = (deltaZ > 0.60f && zStableCount >= 6) || (deltaZ >= 0.04f && zStableCount >= 10);
+                  // If Z dropped below maxConfirmedZ by more than 0.15mm (e.g. baseline was temporarily sampled during travel Z-hop), snap baseline down WITHOUT triggering duplicate capture
+                  if (deltaZ < -0.15f && zStableCount >= 2) {
+                    maxConfirmedZ = axis_z;
+                    activeTriggerMode = "smart_z";
+                    Serial.printf("PrusaLink Polling: SMART Z lower layer detected (Z=%.2fmm). Re-locking baseline without capture.\n", axis_z);
+                  } else {
+                    // Standard layer step (0.04mm - 0.28mm): confirm after 2 consecutive stable polls (~0.6s)
+                    // Larger step (0.28mm - 0.60mm): require 3 stable polls (~0.9s) to reject travel Z-hops
+                    bool confirmedNormalLayer = (deltaZ >= 0.04f && deltaZ <= 0.28f && zStableCount >= 2);
+                    bool confirmedThickLayer  = (deltaZ > 0.28f && deltaZ <= 0.60f && zStableCount >= 3);
+                    // Resynchronization fallback: if intermediate layers missed or long layer (deltaZ > 0.60mm stable for 3 polls, or any deltaZ >= 0.04f stable for 5 polls)
+                    bool confirmedResyncLayer = (deltaZ > 0.60f && zStableCount >= 3) || (deltaZ >= 0.04f && zStableCount >= 5);
 
-                  if (confirmedNormalLayer || confirmedThickLayer || confirmedResyncLayer) {
-                    if (!capture_in_progress && !sd_write_in_progress) {
+                    if (confirmedNormalLayer || confirmedThickLayer || confirmedResyncLayer) {
                       maxConfirmedZ = axis_z;
                       activeTriggerMode = "smart_z";
                       Serial.printf("PrusaLink Polling: SMART Z-TRIGGER (Z=%.2fmm, +%.2fmm, stable=%d, resync=%d) confirmed! Capturing layer...\n",
                                     axis_z, deltaZ, zStableCount, confirmedResyncLayer ? 1 : 0);
-                      xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
+                      triggerCapture();
                     }
                   }
                 }
@@ -2213,8 +2314,8 @@ void setup() {
 
         } else {
           // HTTP connection failed, timed out, or returned an error.
-          // If a print is active, retry after 1s instead of 15s so we never miss layer triggers!
-          pollInterval = (previousPrinterState == "PRINTING") ? 1000 : 10000;
+          // Wait 2s to allow PrusaLink to cleanly clear its TCP TIME_WAIT socket
+          pollInterval = (previousPrinterState == "PRINTING") ? 2000 : 10000;
           Serial.printf("PrusaLink poll failed (code %d). Next poll in %dms.\n", httpCode, pollInterval);
         }
         http.end();
@@ -2279,9 +2380,7 @@ void loop() {
   if (hardware_trigger_flag) {
     hardware_trigger_flag = false;
     Serial.println("Hardware Trigger (GPIO/Serial) detected! Capturing layer...");
-    if (!capture_in_progress && !sd_write_in_progress) {
-      xTaskCreate(captureTask, "captureTask", 8192, NULL, 1, &captureTaskHandle);
-    }
+    triggerCapture();
   }
 
   // Dynamic polling interval based on printer state is now handled in prusaLinkTask
