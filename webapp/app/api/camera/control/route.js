@@ -28,6 +28,7 @@ export async function GET(request) {
       // Log control parameter changes
       if (variable === 'camera_name') {
         const nameVal = searchParams.get('name') || value;
+        monitor.recordCameraIdentity(ip, { camera_name: nameVal }).catch(() => {});
         monitor.log(`Camera ${ip} renamed to "${nameVal}"`, 'success');
       } else if (variable === 'led') {
         const mode = value === '2' ? 'Auto' : (value === '1' ? 'On' : 'Off');

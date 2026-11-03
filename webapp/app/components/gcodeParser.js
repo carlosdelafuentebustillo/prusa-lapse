@@ -157,12 +157,12 @@ export function injectTriggers(gcodeText, config = {}) {
     triggerType = 'park',
     parkX = 240,
     parkY = 210,
-    travelSpeed = 6000,
-    retractDistance = 2.0,
+    travelSpeed = 9000,
+    retractDistance = 0,
     retractSpeed = 2100,
     zHopHeight = 0.4,
-    settleTime = 500,
-    captureTime = 2000,
+    settleTime = 300,
+    captureTime = 1500,
     triggerSignal = 'm220'
   } = config;
 
@@ -301,6 +301,8 @@ export function injectTriggers(gcodeText, config = {}) {
         outLines.push(`G1 E${retractDistance} F${retractSpeed} ; Un-retract`);
       }
 
+      outLines.push('G90 ; Return to absolute positioning');
+      if (isRelativeE) outLines.push('M83 ; Restore relative extrusion');
       outLines.push('; --- PRUSA-LAPSE END ---');
     }
   }

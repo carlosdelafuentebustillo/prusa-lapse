@@ -6,6 +6,9 @@
    ============================================ */
 
 :root {
+  color-scheme: dark;
+  accent-color: var(--color-orange);
+
   /* Primary */
   --color-orange: #FA6831;
   --color-orange-hover: #FF8C42;
@@ -231,6 +234,67 @@ body {
   resize: vertical;
   min-height: 90px;
   line-height: 1.6;
+}
+
+.label {
+  display: block;
+  font-size: 0.74rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 5px;
+  letter-spacing: 0.2px;
+}
+
+.input-field {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color-scheme: dark;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+}
+
+.input-field:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.input-field:focus {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--color-orange-ring);
+  background: rgba(0, 0, 0, 0.65);
+}
+
+.input-field:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  border-color: rgba(255, 255, 255, 0.04);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+input[type="number"].input-field {
+  font-family: var(--font-mono);
+}
+
+select.input-field {
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238B949E' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px !important;
+}
+
+select.input-field option {
+  background-color: #161b22;
+  color: #e6edf3;
+  padding: 6px;
 }
 
 /* ============================================

@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
+import os from 'os';
+import { execFile } from 'child_process';
 
 function findLatestFirmware() {
   const candidatePaths = [
@@ -113,6 +115,31 @@ export async function POST(request) {
       filename = path.basename(latest.path);
     }
 
+    // Attempt native curl upload first: curl handles 100-continue and strict TCP flow control natively,
+    // avoiding the window buffer overflows and ECONNRESET crashes on ESP32-CAM.
+    const tryNativeCurl = async () => {
+      let tmpPath = null;
+      try {
+        tmpPath = path.join(os.tmpdir(), `esp32_ota_${Date.now()}.bin`);
+        fs.writeFileSync(tmpPath, fileBuffer);
+        return await new Promise((resolve) => {
+          execFile('curl.exe', ['-s', '-S', '-F', `update=@${tmpPath}`, `http://${ip}/update`], { timeout: 90000 }, (err, stdout) => {
+            try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (e) {}
+            if (err) return resolve(null);
+            resolve(stdout.trim());
+          });
+        });
+      } catch (e) {
+        try { if (tmpPath && fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (e2) {}
+        return null;
+      }
+    };
+
+    const curlResult = await tryNativeCurl();
+    if (curlResult !== null && (curlResult === 'OK' || curlResult.includes('OK'))) {
+      return NextResponse.json({ success: true, message: 'OK' });
+    }
+
     // Node.js fetch with FormData uses Transfer-Encoding: chunked, which crashes ESPAsyncWebServer.
     // We assemble the multipart payload with exact Content-Length and stream it in paced 4KB chunks
     // respecting TCP backpressure ('drain') to avoid overwhelming the ESP32's 2.8KB window and power rail.
@@ -157,23 +184,25 @@ export async function POST(request) {
       // Write header
       req.write(header);
 
-      // Paced writing of binary payload in 4KB chunks with small yield
+      // Paced writing of binary payload in 4KB chunks with 20ms pacing to avoid overwhelming ESP32 flash write buffers
       const chunkSize = 4096;
       let offset = 0;
       function sendNextChunk() {
-        while (offset < fileBuffer.length) {
-          const end = Math.min(offset + chunkSize, fileBuffer.length);
-          const chunk = fileBuffer.subarray(offset, end);
-          offset = end;
-
-          const canContinue = req.write(chunk);
-          if (!canContinue) {
-            req.once('drain', () => setTimeout(sendNextChunk, 8)); // 8ms pause to let SPI flash write settle
-            return;
-          }
+        if (offset >= fileBuffer.length) {
+          req.end(footer);
+          return;
         }
-        // Write footer and end
-        req.end(footer);
+
+        const end = Math.min(offset + chunkSize, fileBuffer.length);
+        const chunk = fileBuffer.subarray(offset, end);
+        offset = end;
+
+        const canContinue = req.write(chunk);
+        if (!canContinue) {
+          req.once('drain', () => setTimeout(sendNextChunk, 20));
+        } else {
+          setTimeout(sendNextChunk, 20);
+        }
       }
 
       sendNextChunk();
