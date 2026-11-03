@@ -21,3 +21,7 @@ Thumbs.db
 # Release archives and build cache (files > 100MB uploaded via GitHub Releases)
 dist/
 releases/
+desktop/app/
+desktop/bin/
+desktop/dist/
+
