@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { parseGcodeForPreview } from './gcodeParser';
 import dynamic from 'next/dynamic';
 import { saveAs } from 'file-saver';
@@ -28,6 +28,16 @@ export default function SlicerPanel() {
   const [copiedSnippet, setCopiedSnippet] = useState(false);
   const fileInputRef = useRef(null);
 
+  const [slicerStatus, setSlicerStatus] = useState({
+    installed: false,
+    orcaDirectoryFound: false,
+    targetDir: null,
+    pluginDir: null,
+    installing: false,
+    message: null,
+  });
+  const [autoInjectOrcaSlicer, setAutoInjectOrcaSlicer] = useState(true);
+
   const [config, setConfig] = useState({
     parkX: 240,
     parkY: 210,
@@ -40,6 +50,114 @@ export default function SlicerPanel() {
     qualityMode: 'balanced',
     triggerSignal: 'm220',
   });
+
+  const fetchSlicerStatus = async () => {
+    try {
+      const res = await fetch('/api/slicer/status');
+      if (res.ok) {
+        const data = await res.json();
+        setSlicerStatus((prev) => ({
+          ...prev,
+          ...data,
+        }));
+      }
+    } catch (err) {
+      console.error('Failed to fetch OrcaSlicer status:', err);
+    }
+  };
+
+  const fetchConfig = async () => {
+    try {
+      const res = await fetch('/api/config');
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.config?.slicer) {
+          if (typeof data.config.slicer.autoInjectOrcaSlicer === 'boolean') {
+            setAutoInjectOrcaSlicer(data.config.slicer.autoInjectOrcaSlicer);
+          }
+          setConfig((prev) => ({
+            ...prev,
+            ...(data.config.slicer.parkX != null && { parkX: Number(data.config.slicer.parkX) }),
+            ...(data.config.slicer.parkY != null && { parkY: Number(data.config.slicer.parkY) }),
+            ...(data.config.slicer.zHopHeight != null && { zHopHeight: Number(data.config.slicer.zHopHeight) }),
+            ...(data.config.slicer.settleTime != null && { settleTime: Number(data.config.slicer.settleTime) }),
+            ...(data.config.slicer.captureTime != null && { captureTime: Number(data.config.slicer.captureTime) }),
+          }));
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load slicer config:', err);
+    }
+  };
+
+  useEffect(() => {
+    fetchSlicerStatus();
+    fetchConfig();
+  }, []);
+
+  const handleToggleAutoInject = async (e) => {
+    const newVal = e.target.checked;
+    setAutoInjectOrcaSlicer(newVal);
+    try {
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slicer: {
+            autoInjectOrcaSlicer: newVal,
+            parkX: config.parkX,
+            parkY: config.parkY,
+            zHopHeight: config.zHopHeight,
+            settleTime: config.settleTime,
+            captureTime: config.captureTime,
+          },
+        }),
+      });
+      if (!res.ok) {
+        throw new Error('Server returned ' + res.status);
+      }
+    } catch (err) {
+      setAutoInjectOrcaSlicer(!newVal);
+      setSlicerStatus((prev) => ({
+        ...prev,
+        message: { ok: false, text: 'Failed to update auto-injection setting: ' + err.message },
+      }));
+    }
+  };
+
+  const handleInstallPlugin = async () => {
+    setSlicerStatus((prev) => ({ ...prev, installing: true, message: null }));
+    try {
+      const res = await fetch('/api/slicer/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setSlicerStatus((prev) => ({
+          ...prev,
+          installing: false,
+          installed: true,
+          pluginDir: data.pluginDir || prev.pluginDir,
+          message: { ok: true, text: data.message || 'OrcaSlicer plugin installed successfully!' },
+        }));
+        await fetchSlicerStatus();
+      } else {
+        setSlicerStatus((prev) => ({
+          ...prev,
+          installing: false,
+          message: { ok: false, text: data.error || 'Failed to install OrcaSlicer plugin.' },
+        }));
+      }
+    } catch (err) {
+      setSlicerStatus((prev) => ({
+        ...prev,
+        installing: false,
+        message: { ok: false, text: 'Error installing plugin: ' + err.message },
+      }));
+    }
+  };
 
   const buildPrusaSlicerSnippet = () => {
     const signalLines =
@@ -239,7 +357,7 @@ export default function SlicerPanel() {
             <polyline points="2 17 12 22 22 17" />
             <polyline points="2 12 12 17 22 12" />
           </svg>
-          Parked Timelapse Setup (PrusaSlicer Custom G-Code)
+          Timelapse Slicer Setup (OrcaSlicer &amp; PrusaSlicer)
           <span style={{ fontSize: '0.75rem', fontWeight: 400, color: 'var(--text-secondary)', marginLeft: '6px' }}>
             (Optional — Smart Z works automatically without this)
           </span>
@@ -266,6 +384,170 @@ export default function SlicerPanel() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <div style={{ fontSize: '0.83rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
             Your cameras already capture layer changes automatically via <strong>Smart Z</strong>. Only use one of the options below if you want <strong>Parked-Head Timelapses</strong> (moving the extruder to <code>X{config.parkX} Y{config.parkY}</code> on every layer so the print appears to grow by magic).
+          </div>
+
+          {/* OrcaSlicer Native Plugin (v2.5+) Card */}
+          <div
+            style={{
+              background: 'linear-gradient(180deg, rgba(250, 104, 49, 0.08) 0%, rgba(255, 255, 255, 0.02) 100%)',
+              border: '1px solid rgba(250, 104, 49, 0.35)',
+              borderRadius: '10px',
+              padding: '16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '14px',
+            }}
+          >
+            {/* Card Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontWeight: 600, fontSize: '0.98rem', color: 'var(--text-primary)', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--color-orange)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                  </svg>
+                  OrcaSlicer Native Plugin (v2.5+)
+                </span>
+                <span style={{ fontSize: '0.68rem', background: 'rgba(250, 104, 49, 0.15)', color: 'var(--color-orange)', border: '1px solid rgba(250, 104, 49, 0.35)', padding: '1px 7px', borderRadius: '10px', fontWeight: 600 }}>
+                  Automated Hook
+                </span>
+              </div>
+
+              {slicerStatus.installed ? (
+                <span style={{ fontSize: '0.72rem', background: 'rgba(46, 204, 113, 0.15)', color: '#2ecc71', border: '1px solid rgba(46, 204, 113, 0.35)', padding: '2px 8px', borderRadius: '10px', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#2ecc71' }} />
+                  OrcaSlicer Plugin Installed
+                </span>
+              ) : (
+                <span style={{ fontSize: '0.72rem', background: 'rgba(255, 255, 255, 0.06)', color: 'var(--text-secondary)', border: '1px solid rgba(255, 255, 255, 0.12)', padding: '2px 8px', borderRadius: '10px', fontWeight: 500 }}>
+                  Plugin Not Installed
+                </span>
+              )}
+            </div>
+
+            <p style={{ fontSize: '0.79rem', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.45 }}>
+              Direct integration with OrcaSlicer. Automatically injects toolhead parking moves and camera capture triggers during slice and export — no manual G-code snippet pasting required.
+            </p>
+
+            {/* Auto-Injection Toggle & Live Status */}
+            <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: '8px', padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', userSelect: 'none' }}>
+                  <input
+                    type="checkbox"
+                    checked={autoInjectOrcaSlicer}
+                    onChange={handleToggleAutoInject}
+                    style={{ width: '16px', height: '16px', accentColor: 'var(--color-orange)', cursor: 'pointer' }}
+                  />
+                  <span style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+                    Automatic Slicing Injection
+                  </span>
+                </label>
+
+                {autoInjectOrcaSlicer ? (
+                  <span style={{ background: 'rgba(46, 204, 113, 0.15)', color: '#2ecc71', border: '1px solid rgba(46, 204, 113, 0.35)', padding: '2px 9px', borderRadius: '12px', fontSize: '0.72rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                    <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#2ecc71' }} />
+                    Active
+                  </span>
+                ) : (
+                  <span style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#f59e0b', border: '1px solid rgba(245, 158, 11, 0.35)', padding: '2px 9px', borderRadius: '12px', fontSize: '0.72rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                    <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#f59e0b' }} />
+                    Disabled
+                  </span>
+                )}
+              </div>
+
+              <div style={{ fontSize: '0.75rem', color: autoInjectOrcaSlicer ? '#2ecc71' : '#f59e0b', lineHeight: 1.4 }}>
+                {autoInjectOrcaSlicer
+                  ? 'G-code triggers and parking moves will be automatically injected on slice.'
+                  : 'Auto-injection paused. Standard high-speed prints without toolhead parking.'}
+              </div>
+            </div>
+
+            {/* Plugin Installer Row */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px', background: 'rgba(255, 255, 255, 0.02)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: '8px', padding: '10px 14px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                  {slicerStatus.installed ? 'Plugin Integration Ready' : 'Install OrcaSlicer Plugin'}
+                </span>
+                <span style={{ fontSize: '0.71rem', color: 'var(--text-secondary)', fontFamily: slicerStatus.pluginDir || slicerStatus.targetDir ? 'var(--font-mono)' : 'inherit' }}>
+                  {slicerStatus.installed
+                    ? `Path: ${slicerStatus.pluginDir || slicerStatus.targetDir}`
+                    : slicerStatus.targetDir
+                    ? `Target: ${slicerStatus.targetDir}`
+                    : 'Copies the plugin bridge into OrcaSlicer user plugins directory.'}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                className={`btn btn-small ${slicerStatus.installed ? 'btn-ghost' : 'btn-primary'}`}
+                style={{ width: 'auto', padding: '7px 14px', fontSize: '0.78rem', fontWeight: 600 }}
+                disabled={slicerStatus.installing}
+                onClick={handleInstallPlugin}
+              >
+                {slicerStatus.installing
+                  ? 'Installing Plugin…'
+                  : slicerStatus.installed
+                  ? 'Reinstall / Update Plugin'
+                  : 'Install Plugin into OrcaSlicer'}
+              </button>
+            </div>
+
+            {/* Plugin Status Message */}
+            {slicerStatus.message && (
+              <div
+                style={{
+                  fontSize: '0.76rem',
+                  color: slicerStatus.message.ok ? '#2ecc71' : '#ff6b6b',
+                  background: slicerStatus.message.ok ? 'rgba(46, 204, 113, 0.1)' : 'rgba(232, 83, 63, 0.12)',
+                  border: `1px solid ${slicerStatus.message.ok ? 'rgba(46, 204, 113, 0.35)' : 'rgba(232, 83, 63, 0.35)'}`,
+                  padding: '8px 12px',
+                  borderRadius: '6px',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: '8px',
+                }}
+              >
+                <span>{slicerStatus.message.text}</span>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-small"
+                  style={{ width: 'auto', padding: '1px 6px', fontSize: '0.7rem' }}
+                  onClick={() => setSlicerStatus((prev) => ({ ...prev, message: null }))}
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {/* Safety & Format Badges */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '6px', borderTop: '1px solid rgba(255, 255, 255, 0.06)' }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                <span style={{ fontSize: '0.72rem', color: '#2ecc71', background: 'rgba(46, 204, 113, 0.08)', border: '1px solid rgba(46, 204, 113, 0.25)', padding: '3px 8px', borderRadius: '5px', fontWeight: 500 }}>
+                  ✓ Dynamic Bed Boundary Clamping (Safe for MK4, MK3.9, MINI, XL)
+                </span>
+                <span style={{ fontSize: '0.72rem', color: '#2ecc71', background: 'rgba(46, 204, 113, 0.08)', border: '1px solid rgba(46, 204, 113, 0.25)', padding: '3px 8px', borderRadius: '5px', fontWeight: 500 }}>
+                  ✓ Strict Relative Extrusion (M83) Protected
+                </span>
+                <span
+                  style={{ fontSize: '0.72rem', color: '#60a5fa', background: 'rgba(96, 165, 250, 0.08)', border: '1px solid rgba(96, 165, 250, 0.25)', padding: '3px 8px', borderRadius: '5px', fontWeight: 500 }}
+                  title="Binary .bgcode is compressed; OrcaSlicer automatically injects triggers into standard ASCII .gcode or on export."
+                >
+                  ℹ Binary .bgcode bypass notice
+                </span>
+              </div>
+              <div style={{ fontSize: '0.71rem', color: 'var(--text-secondary)', lineHeight: 1.4 }}>
+                ℹ Binary <code>.bgcode</code> files are compressed and cannot be parsed post-slice. OrcaSlicer exports standard ASCII <code>.gcode</code> when using the auto-injection hook.
+              </div>
+            </div>
+          </div>
+
+          {/* Section Divider */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', margin: '2px 0', color: 'var(--text-secondary)', fontSize: '0.72rem', fontWeight: 600, letterSpacing: '0.5px' }}>
+            <div style={{ flex: 1, height: '1px', background: 'rgba(255, 255, 255, 0.08)' }} />
+            <span>OR MANUAL SLICER SETUP (PRUSASLICER &amp; OTHER SLICERS)</span>
+            <div style={{ flex: 1, height: '1px', background: 'rgba(255, 255, 255, 0.08)' }} />
           </div>
 
           {/* 2 Simple Workflow Cards */}
@@ -639,7 +921,7 @@ export default function SlicerPanel() {
                 <div style={{ fontSize: '0.73rem', color: 'var(--text-secondary)', lineHeight: 1.5, background: 'rgba(255,255,255,0.02)', padding: '8px 12px', borderRadius: '6px' }}>
                   {triggerType === 'park' ? (
                     <span>
-                      💡 <strong>Parked Mode:</strong> Lifts Z by {config.zHopHeight}mm, parks at <code>X{config.parkX} Y{config.parkY}</code>, and pauses {config.settleTime + config.captureTime}ms for capture. Relative extrusion (<code>M83</code>) is strictly locked so PrusaSlicer's native layer retractions and perimeters extrude 100% reliably.
+                      💡 <strong>Parked Mode:</strong> Lifts Z by {config.zHopHeight}mm, parks at <code>X{config.parkX} Y{config.parkY}</code>, and pauses {config.settleTime + config.captureTime}ms for capture. Relative extrusion (<code>M83</code>) is strictly locked so PrusaSlicer&apos;s native layer retractions and perimeters extrude 100% reliably.
                     </span>
                   ) : triggerType === 'snap' ? (
                     <span>
