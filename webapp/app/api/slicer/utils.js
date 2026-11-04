@@ -6,7 +6,8 @@ import { fileURLToPath } from 'url';
 /**
  * Resolves OrcaSlicer configuration and plugins paths based on OS:
  * - Windows: %APPDATA%\OrcaSlicer\plugins (fallback: %USERPROFILE%\AppData\Roaming\OrcaSlicer\plugins)
- * - Linux/Mac: ~/.config/OrcaSlicer/plugins (or $XDG_CONFIG_HOME/OrcaSlicer/plugins)
+ * - macOS: ~/Library/Application Support/OrcaSlicer/plugins
+ * - Linux: ~/.config/OrcaSlicer/plugins (or $XDG_CONFIG_HOME/OrcaSlicer/plugins)
  */
 export function getOrcaSlicerPaths(env = process.env, platform = process.platform) {
   let orcaConfigDir;
@@ -15,6 +16,9 @@ export function getOrcaSlicerPaths(env = process.env, platform = process.platfor
   if (isWin) {
     const appData = env.APPDATA || (env.USERPROFILE ? path.join(env.USERPROFILE, 'AppData', 'Roaming') : path.join(os.homedir(), 'AppData', 'Roaming'));
     orcaConfigDir = path.join(appData, 'OrcaSlicer');
+  } else if (platform === 'darwin') {
+    const homeDir = env.HOME || os.homedir();
+    orcaConfigDir = path.join(homeDir, 'Library', 'Application Support', 'OrcaSlicer');
   } else {
     const homeDir = env.HOME || os.homedir();
     const configDir = env.XDG_CONFIG_HOME || path.join(homeDir, '.config');

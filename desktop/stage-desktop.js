@@ -27,4 +27,16 @@ if (fs.existsSync(sysCurl)) {
   fs.copyFileSync(sysCurl, path.join(desktopBin, 'curl.exe'));
 }
 
+console.log('[Desktop Stager] Copying orcaslicer-plugin to desktop/app...');
+const pluginSrc = path.join(rootDir, 'orcaslicer-plugin', 'prusalapse');
+const pluginDest = path.join(desktopApp, 'orcaslicer-plugin', 'prusalapse');
+if (fs.existsSync(pluginSrc)) {
+  fs.mkdirSync(pluginDest, { recursive: true });
+  fs.cpSync(pluginSrc, pluginDest, {
+    recursive: true,
+    force: true,
+    filter: (srcPath) => !srcPath.includes('__pycache__') && !srcPath.endsWith('.pyc')
+  });
+}
+
 console.log('[Desktop Stager] Staging complete!');
