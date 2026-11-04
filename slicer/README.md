@@ -48,18 +48,16 @@ If you want PrusaSlicer to inject the triggers automatically so you can use the 
 
 ---
 
-## Method 3 — CLI Tool
+## Method 3 — OrcaSlicer Native Plugin (Fully Automated)
 
-Use the lightweight Command-Line tool to automatically inject the complex G-code into your models in bulk.
+OrcaSlicer 2.5+ users can install the native pure-Python plugin for 100% automated G-code injection on slice.
 
 ### Steps
-1. Open your terminal and navigate to the `cli/` directory.
-2. Edit `config.json` to configure your preferences:
-   - **triggerType**: Set to `park` to park the print head during capture.
-   - **parkX** / **parkY**: Set the desired parking coordinates.
-   - **triggerSignal**: Select your preferred method (`m220`, `gpio0`, or `serial`).
-3. Run the CLI tool on your sliced `.gcode` file: `prusalapse.bat path/to/your/file.gcode` (or use `node prusalapse.mjs` directly).
-4. The tool will inject the necessary G-code.
+1. Open the Prusa-lapse Web Interface or Desktop application.
+2. In the **Slicer Integration** panel, click **Install Plugin into OrcaSlicer**.
+3. Toggle **Auto-inject G-Code on Slice** to `Enabled`.
+4. Slice and export or send prints directly—parking, vibration settle, and M220 camera triggers are injected automatically with bed clamping and relative extrusion safety guards.
+5. Alternatively, copy the `orcaslicer-plugin/prusalapse` directory into your OrcaSlicer plugins folder manually.
 
 ---
 
