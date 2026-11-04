@@ -15,6 +15,11 @@ from prusalapse.plugin import (
     process_slicing_file,
     PrusaLapsePage,
     PrusaLapseSlicingHook,
+    PrusaLapsePlugin,
+    is_server_alive,
+    find_server_components,
+    ensure_server_running,
+    stop_server_process,
     orca,
 )
 
@@ -186,6 +191,63 @@ class TestPluginBridge(unittest.TestCase):
         ctx_other.gcode_path = gcode_path
         res_other = hook.execute(ctx_other)
         self.assertTrue(res_other.is_ok if hasattr(res_other, "is_ok") else res_other)
+
+    @patch("urllib.request.urlopen")
+    def test_is_server_alive(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+        self.assertTrue(is_server_alive("http://127.0.0.1:3000"))
+
+        mock_urlopen.side_effect = Exception("Connection refused")
+        self.assertFalse(is_server_alive("http://127.0.0.1:3000"))
+
+    def test_find_server_components(self):
+        runner, script, env = find_server_components()
+        # On this environment, electron binary and script or node are located
+        if runner and script:
+            self.assertTrue(os.path.exists(runner))
+            self.assertTrue(os.path.exists(script))
+
+    @patch("subprocess.Popen")
+    @patch("prusalapse.plugin.is_server_alive")
+    def test_ensure_server_running_and_stop(self, mock_alive, mock_popen):
+        import prusalapse.plugin as pl_mod
+        pl_mod._SERVER_PROCESS = None
+
+        mock_alive.return_value = False
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_popen.return_value = mock_proc
+
+        with patch("prusalapse.plugin.find_server_components", return_value=("node.exe", "server.js", {})):
+            started = ensure_server_running("http://127.0.0.1:3000")
+            self.assertTrue(started)
+            mock_popen.assert_called_once()
+            self.assertIsNotNone(pl_mod._SERVER_PROCESS)
+
+            stop_server_process()
+            mock_proc.terminate.assert_called_once()
+            self.assertIsNone(pl_mod._SERVER_PROCESS)
+
+    @patch("prusalapse.plugin.ensure_server_running")
+    def test_on_message_start_server(self, mock_ensure):
+        page = PrusaLapsePage(config_path=self.config_path)
+        self.assertEqual(mock_ensure.call_count, 1)
+        page.on_message({"action": "start_server"})
+        self.assertEqual(mock_ensure.call_count, 2)
+
+    def test_plugin_lifecycle(self):
+        plugin = PrusaLapsePlugin()
+        self.assertEqual(plugin.id, "prusalapse")
+        self.assertEqual(plugin.version, "1.3.2")
+        with patch("prusalapse.plugin.ensure_server_running") as mock_ensure:
+            plugin.on_load()
+            mock_ensure.assert_called_once()
+        with patch("prusalapse.plugin.stop_server_process") as mock_stop:
+            plugin.on_unload()
+            mock_stop.assert_called_once()
 
 
 if __name__ == "__main__":

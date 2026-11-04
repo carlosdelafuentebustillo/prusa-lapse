@@ -1,13 +1,13 @@
 # /// script
 # name = "prusalapse"
-# version = "1.3.1"
+# version = "1.3.2"
 # description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
 # authors = [{name = "PrusaLapse"}]
 # requires-python = ">=3.10"
 # dependencies = []
 # [tool.orcaslicer.plugin]
 # name = "prusalapse"
-# version = "1.3.1"
+# version = "1.3.2"
 # author = "PrusaLapse"
 # description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
 # ///
@@ -25,11 +25,15 @@ Provides:
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -43,6 +47,170 @@ START_MARKER = "; --- PRUSA-LAPSE PARKED TIMELAPSE START ---"
 END_MARKER = "; --- PRUSA-LAPSE PARKED TIMELAPSE END ---"
 
 DEFAULT_BED_LIMITS = (250.0, 210.0)
+
+_SERVER_PROCESS: subprocess.Popen | None = None
+
+
+# ---------------------------------------------------------------------------
+# Embedded Server Process Management
+# ---------------------------------------------------------------------------
+
+def is_server_alive(host: str = "http://127.0.0.1:3000", timeout: float = 0.5) -> bool:
+    """Return True if the PrusaLapse HTTP server is active and responding."""
+    url = f"{host.rstrip('/')}/api/config"
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "OrcaSlicer-PrusaLapse-Probe"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status in (200, 304)
+    except Exception:
+        return False
+
+
+def find_server_components() -> tuple[str | None, str | None, dict[str, str]]:
+    """Locate the server executable runner, server.js script, and environment flags."""
+    electron_win = r"C:\Program Files\PrusaLapse\PrusaLapse.exe"
+    electron_app_js = r"C:\Program Files\PrusaLapse\resources\app\app\server.js"
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    electron_local_win = os.path.join(
+        local_app_data, "Programs", "PrusaLapse", "PrusaLapse.exe"
+    )
+    electron_local_js = os.path.join(
+        local_app_data, "Programs", "PrusaLapse", "resources", "app", "app", "server.js"
+    )
+
+    script_candidates = [
+        os.environ.get("PRUSALAPSE_SERVER_SCRIPT"),
+        electron_app_js,
+        electron_local_js,
+        os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..",
+                "..",
+                "webapp",
+                ".next",
+                "standalone",
+                "server.js",
+            )
+        ),
+        os.path.abspath(
+            r"C:\Users\cafub\Documents\Antigravity\dual-dalmatian\webapp\.next\standalone\server.js"
+        ),
+    ]
+
+    selected_script = None
+    for cand in script_candidates:
+        if cand and os.path.exists(cand):
+            selected_script = cand
+            break
+
+    if not selected_script:
+        return None, None, {}
+
+    extra_env: dict[str, str] = {}
+    if os.path.exists(electron_win):
+        runner = electron_win
+        extra_env["ELECTRON_RUN_AS_NODE"] = "1"
+    elif os.path.exists(electron_local_win):
+        runner = electron_local_win
+        extra_env["ELECTRON_RUN_AS_NODE"] = "1"
+    else:
+        runner = shutil.which("node")
+
+    if not runner:
+        return None, None, {}
+
+    # Detect bundled FFmpeg binary for server video compilation
+    ffmpeg_candidates = [
+        r"C:\Program Files\PrusaLapse\resources\app\bin\ffmpeg.exe",
+        r"C:\Program Files\PrusaLapse\resources\bin\ffmpeg.exe",
+        os.path.join(local_app_data, "Programs", "PrusaLapse", "resources", "app", "bin", "ffmpeg.exe"),
+        shutil.which("ffmpeg"),
+    ]
+    for fc in ffmpeg_candidates:
+        if fc and os.path.exists(fc):
+            extra_env["FFMPEG_PATH"] = fc
+            break
+
+    # Direct writable config and captures to %APPDATA%\PrusaLapse
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        pl_dir = os.path.join(appdata, "PrusaLapse")
+        try:
+            os.makedirs(pl_dir, exist_ok=True)
+            extra_env["PRUSALAPSE_CONFIG_FILE"] = os.path.join(pl_dir, "prusa-lapse.config.json")
+            extra_env["PRUSALAPSE_CAPTURES_DIR"] = os.path.join(pl_dir, "captures")
+        except Exception:
+            pass
+
+    return runner, selected_script, extra_env
+
+
+def ensure_server_running(host: str = "http://127.0.0.1:3000") -> bool:
+    """
+    Ensure the PrusaLapse server is running.
+    If targeting localhost/127.0.0.1 and offline, spawns the server in the background.
+    """
+    global _SERVER_PROCESS
+
+    # Only attempt to auto-spawn if host is local
+    is_local = "127.0.0.1" in host or "localhost" in host
+    if not is_local:
+        return True
+
+    if is_server_alive(host):
+        return True
+
+    if _SERVER_PROCESS is not None and _SERVER_PROCESS.poll() is None:
+        return True
+
+    runner, script, extra_env = find_server_components()
+    if not runner or not script:
+        return False
+
+    port = "3000"
+    m = re.search(r":(\d+)", host)
+    if m:
+        port = m.group(1)
+
+    env = dict(os.environ)
+    env.update(extra_env)
+    env["PORT"] = port
+    env["HOSTNAME"] = "127.0.0.1"
+    env["NODE_ENV"] = "production"
+
+    cwd = os.path.dirname(os.path.abspath(script))
+    creationflags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+
+    try:
+        _SERVER_PROCESS = subprocess.Popen(
+            [runner, script],
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def stop_server_process() -> None:
+    """Terminate the spawned background server process when OrcaSlicer exits."""
+    global _SERVER_PROCESS
+    if _SERVER_PROCESS is not None:
+        try:
+            if _SERVER_PROCESS.poll() is None:
+                _SERVER_PROCESS.terminate()
+        except Exception:
+            pass
+        _SERVER_PROCESS = None
+
+
+atexit.register(stop_server_process)
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +425,7 @@ def fetch_remote_config(host: str, timeout: float = 1.5) -> dict[str, Any]:
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "PrusaLapse-OrcaSlicer-Plugin/1.3.1",
+            "User-Agent": "PrusaLapse-OrcaSlicer-Plugin/1.3.2",
             "Accept": "application/json",
         },
     )
@@ -432,52 +600,220 @@ class PrusaLapsePage(orca.pages.PagesPluginCapabilityBase):
     def __init__(self, config_path: str | None = None) -> None:
         super().__init__()
         self.config_path = config_path
+        try:
+            cfg = load_local_config(self.config_path)
+            host = cfg.get("host", "http://127.0.0.1:3000")
+            ensure_server_running(host)
+        except Exception:
+            pass
 
     def get_name(self) -> str:
         """Tab name displayed in OrcaSlicer upper navigation."""
         return "PrusaLapse"
 
     def get_ui(self) -> str:
-        """Return HTML string embedding responsive iframe and postMessage bridge."""
+        """Return HTML string embedding responsive iframe, loading screen, and postMessage bridge."""
         cfg = load_local_config(self.config_path)
         host = cfg.get("host", "http://127.0.0.1:3000")
+        is_local = "127.0.0.1" in host or "localhost" in host
 
-        return f"""<!DOCTYPE html>
+        if is_local:
+            try:
+                ensure_server_running(host)
+            except Exception:
+                pass
+            server_alive = is_server_alive(host, timeout=0.3)
+        else:
+            server_alive = True
+
+        initial_src = host if server_alive else ""
+        initial_frame_display = "block" if server_alive else "none"
+        initial_loader_display = "none" if server_alive else "flex"
+
+        html_template = """<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
+  <title>PrusaLapse</title>
   <style>
-    html, body {{
+    * {
+      box-sizing: border-box;
+    }
+    html, body {
       margin: 0;
       padding: 0;
       width: 100%;
       height: 100%;
       overflow: hidden;
-      background: #121212;
+      background: #0f172a;
+      color: #f8fafc;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    }}
-    #prusalapse-frame {{
+    }
+    #prusalapse-frame {
       width: 100%;
       height: 100%;
       border: none;
-    }}
+      display: __FRAME_DISPLAY__;
+    }
+    #loader-container {
+      display: __LOADER_DISPLAY__;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      height: 100%;
+      text-align: center;
+      padding: 2rem;
+      background: #0f172a;
+    }
+    .spinner {
+      width: 48px;
+      height: 48px;
+      border: 4px solid #1e293b;
+      border-top: 4px solid #38bdf8;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 1.5rem;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    h2 {
+      margin: 0 0 0.5rem 0;
+      font-size: 1.6rem;
+      color: #38bdf8;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    p {
+      margin: 0 0 1.5rem 0;
+      color: #94a3b8;
+      max-width: 480px;
+      line-height: 1.5;
+      font-size: 0.95rem;
+    }
+    code {
+      background: #1e293b;
+      padding: 3px 8px;
+      border-radius: 4px;
+      color: #f1f5f9;
+      font-size: 0.9rem;
+    }
+    .btn {
+      background: #0284c7;
+      color: white;
+      border: none;
+      padding: 10px 24px;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: background 0.15s ease;
+      display: none;
+    }
+    .btn:hover {
+      background: #0369a1;
+    }
+    .status-pill {
+      font-size: 0.82rem;
+      color: #64748b;
+      margin-top: 0.5rem;
+    }
   </style>
 </head>
 <body>
-  <iframe id="prusalapse-frame" src="{host}" allow="camera; microphone; display-capture"></iframe>
+  <div id="loader-container">
+    <div class="spinner" id="loader-spinner"></div>
+    <h2 id="loader-title">PrusaLapse</h2>
+    <p id="loader-msg">Starting embedded timelapse engine directly in OrcaSlicer...</p>
+    <button class="btn" id="retry-btn" onclick="retryConnection()">Retry Connection</button>
+    <div class="status-pill" id="poll-status">Connecting to local server...</div>
+  </div>
+  <iframe id="prusalapse-frame" src="__INITIAL_SRC__" allow="camera; microphone; display-capture"></iframe>
   <script>
-    window.addEventListener('message', function(event) {{
-      if (event.data && typeof event.data === 'object') {{
-        if (event.data.type === 'save_config' || event.data.action === 'save_config') {{
-          if (window.orca && window.orca.postMessage) {{
+    const host = "__HOST__";
+    const frame = document.getElementById("prusalapse-frame");
+    const loader = document.getElementById("loader-container");
+    const spinner = document.getElementById("loader-spinner");
+    const title = document.getElementById("loader-title");
+    const msg = document.getElementById("loader-msg");
+    const retryBtn = document.getElementById("retry-btn");
+    const pollStatus = document.getElementById("poll-status");
+
+    let isConnected = frame.style.display === "block" && frame.src.length > 0;
+    let attempts = 0;
+    const maxAttempts = 40; // 40 * 350ms = 14s
+
+    function probe() {
+      if (isConnected) return;
+      fetch(host + "/api/config", { cache: "no-store" })
+        .then(function(res) {
+          if (res.ok) {
+            isConnected = true;
+            frame.src = host;
+            frame.style.display = "block";
+            loader.style.display = "none";
+          } else {
+            handleFailedProbe();
+          }
+        })
+        .catch(function() {
+          handleFailedProbe();
+        });
+    }
+
+    function handleFailedProbe() {
+      attempts++;
+      if (attempts >= maxAttempts) {
+        spinner.style.display = "none";
+        title.textContent = "Embedded Server Did Not Respond";
+        title.style.color = "#f87171";
+        msg.innerHTML = "Could not connect to <code>" + host + "</code>.<br>Click Retry to attempt re-launching the embedded server.";
+        retryBtn.style.display = "inline-block";
+        pollStatus.textContent = "Server initialization timed out.";
+      } else {
+        setTimeout(probe, 350);
+      }
+    }
+
+    function retryConnection() {
+      attempts = 0;
+      spinner.style.display = "block";
+      title.textContent = "PrusaLapse";
+      title.style.color = "#38bdf8";
+      msg.textContent = "Re-launching embedded server...";
+      retryBtn.style.display = "none";
+      pollStatus.textContent = "Connecting to local server...";
+      if (window.orca && window.orca.postMessage) {
+        window.orca.postMessage(JSON.stringify({ action: "start_server" }));
+      }
+      setTimeout(probe, 500);
+    }
+
+    if (!isConnected) {
+      probe();
+    }
+
+    window.addEventListener('message', function(event) {
+      if (event.data && typeof event.data === 'object') {
+        if (event.data.type === 'save_config' || event.data.action === 'save_config') {
+          if (window.orca && window.orca.postMessage) {
             window.orca.postMessage(JSON.stringify(event.data));
-          }}
-        }}
-      }}
-    }});
+          }
+        }
+      }
+    });
   </script>
 </body>
 </html>"""
+        return (
+            html_template
+            .replace("__HOST__", host)
+            .replace("__INITIAL_SRC__", initial_src)
+            .replace("__FRAME_DISPLAY__", initial_frame_display)
+            .replace("__LOADER_DISPLAY__", initial_loader_display)
+        )
 
     def on_message(self, message: Any) -> None:
         """Handle IPC message received from webview."""
@@ -489,6 +825,12 @@ class PrusaLapsePage(orca.pages.PagesPluginCapabilityBase):
 
         if isinstance(message, dict):
             msg_type = message.get("type") or message.get("action")
+            if msg_type in ("start_server", "retry_server"):
+                cfg = load_local_config(self.config_path)
+                host = cfg.get("host", "http://127.0.0.1:3000")
+                ensure_server_running(host)
+                return
+
             if msg_type == "save_config":
                 cfg = load_local_config(self.config_path)
                 changed = False
@@ -557,14 +899,22 @@ _BasePluginClass = getattr(orca, "base", object)
 class PrusaLapsePlugin(_BasePluginClass):
     id = "prusalapse"
     name = "PrusaLapse"
-    version = "1.3.1"
+    version = "1.3.2"
     description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
     author = "PrusaLapse"
     page = PrusaLapsePage
     slicing_hook = PrusaLapseSlicingHook
 
     def on_load(self) -> None:
-        pass
+        try:
+            cfg = load_local_config()
+            host = cfg.get("host", "http://127.0.0.1:3000")
+            ensure_server_running(host)
+        except Exception:
+            pass
 
     def on_unload(self) -> None:
-        pass
+        try:
+            stop_server_process()
+        except Exception:
+            pass

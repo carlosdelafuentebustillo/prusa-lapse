@@ -1,6 +1,6 @@
 {
   "name": "prusalapse-desktop",
-  "version": "1.3.0",
+  "version": "1.3.2",
   "description": "PrusaLapse Cinematic Multi-Camera Timelapse Desktop Application",
   "author": "Carlos de la Fuente Bustillo",
   "main": "main.js",
