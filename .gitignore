@@ -17,6 +17,9 @@ Thumbs.db
 *.lnk
 .env*
 .superpowers/
+__pycache__/
+*.py[cod]
+
 
 # Release archives and build cache (files > 100MB uploaded via GitHub Releases)
 dist/
