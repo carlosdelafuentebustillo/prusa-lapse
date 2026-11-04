@@ -30,15 +30,15 @@ Copy the `prusalapse` plugin directory directly into the OrcaSlicer plugins fold
 
 - **Windows**:
   ```powershell
-  %APPDATA%\OrcaSlicer\plugins\prusalapse\
+  %APPDATA%\OrcaSlicer\orca_plugins\prusalapse\
   ```
 - **macOS**:
   ```bash
-  ~/Library/Application Support/OrcaSlicer/plugins/prusalapse/
+  ~/Library/Application Support/OrcaSlicer/orca_plugins/prusalapse/
   ```
 - **Linux**:
   ```bash
-  ~/.config/OrcaSlicer/plugins/prusalapse/
+  ~/.config/OrcaSlicer/orca_plugins/prusalapse/
   ```
 
 Restart OrcaSlicer after copying the files.

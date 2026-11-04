@@ -37,12 +37,32 @@ export async function POST(request) {
       }, { status: 404 });
     }
 
+    const isOrcaPluginsDir = targetDir.includes('orca_plugins');
+
     fs.mkdirSync(targetDir, { recursive: true });
     fs.cpSync(src, dest, {
       recursive: true,
       force: true,
-      filter: (srcPath) => !srcPath.includes('__pycache__') && !srcPath.endsWith('.pyc')
+      filter: (srcPath) => {
+        if (srcPath.includes('__pycache__') || srcPath.endsWith('.pyc')) return false;
+        // In orca_plugins, OrcaSlicer 2.5 enforces exactly one .py entry file per plugin directory
+        if (isOrcaPluginsDir) {
+          const base = path.basename(srcPath);
+          if (base === 'injector.py' || base === '__init__.py') return false;
+        }
+        return true;
+      }
     });
+
+    const stateFile = path.join(dest, 'install_state.json');
+    if (!fs.existsSync(stateFile)) {
+      fs.writeFileSync(stateFile, JSON.stringify({
+        installed_from: 'local',
+        plugin_name: 'prusalapse',
+        cloud_uuid: '',
+        events: []
+      }, null, 2), 'utf-8');
+    }
 
     return Response.json({
       success: true,

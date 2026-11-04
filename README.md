@@ -69,22 +69,22 @@ PrusaLapse includes a native Python plugin for **OrcaSlicer 2.5+** that automati
 
 #### Option 2: Manual `.zip` Installation
 1. Download `prusalapse-orcaslicer-plugin.zip` from the latest [Release](releases/v1.3.0/).
-2. Extract the archive directly into OrcaSlicer's `plugins` folder for your operating system:
+2. Extract the archive directly into OrcaSlicer's `orca_plugins` folder for your operating system:
    - **Windows**:
      ```powershell
-     %APPDATA%\OrcaSlicer\plugins\
+     %APPDATA%\OrcaSlicer\orca_plugins\
      ```
-     *(extracting creates `%APPDATA%\OrcaSlicer\plugins\prusalapse\`)*
+     *(extracting creates `%APPDATA%\OrcaSlicer\orca_plugins\prusalapse\`)*
    - **macOS**:
      ```bash
-     ~/Library/Application Support/OrcaSlicer/plugins/
+     ~/Library/Application Support/OrcaSlicer/orca_plugins/
      ```
-     *(creates `~/Library/Application Support/OrcaSlicer/plugins/prusalapse/`)*
+     *(creates `~/Library/Application Support/OrcaSlicer/orca_plugins/prusalapse/`)*
    - **Linux**:
      ```bash
-     ~/.config/OrcaSlicer/plugins/
+     ~/.config/OrcaSlicer/orca_plugins/
      ```
-     *(creates `~/.config/OrcaSlicer/plugins/prusalapse/`)*
+     *(creates `~/.config/OrcaSlicer/orca_plugins/prusalapse/`)*
 3. Restart OrcaSlicer.
 
 > [!TIP]

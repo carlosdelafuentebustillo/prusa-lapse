@@ -185,7 +185,7 @@ const orcaZip = new AdmZip();
 function addPluginFilesRecursively(dir, zipSubDir) {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.name === '__pycache__' || entry.name.endsWith('.pyc')) continue;
+    if (entry.name === '__pycache__' || entry.name.endsWith('.pyc') || entry.name === 'injector.py' || entry.name === '__init__.py') continue;
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       addPluginFilesRecursively(fullPath, path.posix.join(zipSubDir, entry.name));

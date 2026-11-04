@@ -25,9 +25,19 @@ export function getOrcaSlicerPaths(env = process.env, platform = process.platfor
     orcaConfigDir = path.join(configDir, 'OrcaSlicer');
   }
 
-  const targetDir = env.ORCASLICER_PLUGINS_DIR || path.join(orcaConfigDir, 'plugins');
+  // OrcaSlicer 2.5+ uses 'orca_plugins' when present on the system; falls back to 'plugins' for older versions / mocks
+  const hasOrcaPlugins = orcaConfigDir && fs.existsSync(path.join(orcaConfigDir, 'orca_plugins'));
+  const pluginsFolder = hasOrcaPlugins ? 'orca_plugins' : 'plugins';
+
+  const targetDir = env.ORCASLICER_PLUGINS_DIR || path.join(orcaConfigDir, pluginsFolder);
   const pluginDir = path.join(targetDir, 'prusalapse');
   const pluginFile = path.join(pluginDir, 'plugin.py');
+
+  const installedInOrcaPlugins = fs.existsSync(path.join(orcaConfigDir, 'orca_plugins', 'prusalapse', 'plugin.py'));
+  const installedInPlugins = fs.existsSync(path.join(orcaConfigDir, 'plugins', 'prusalapse', 'plugin.py'));
+  const isInstalled = env.ORCASLICER_PLUGINS_DIR
+    ? fs.existsSync(pluginFile)
+    : (installedInOrcaPlugins || installedInPlugins || fs.existsSync(pluginFile));
 
   return {
     orcaConfigDir,
@@ -35,7 +45,7 @@ export function getOrcaSlicerPaths(env = process.env, platform = process.platfor
     pluginDir,
     pluginFile,
     orcaDirectoryFound: fs.existsSync(orcaConfigDir),
-    installed: fs.existsSync(pluginFile)
+    installed: isInstalled
   };
 }
 
