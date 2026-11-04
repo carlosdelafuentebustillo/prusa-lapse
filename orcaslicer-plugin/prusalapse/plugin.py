@@ -2,11 +2,13 @@
 # name = "prusalapse"
 # version = "1.3.1"
 # description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
+# authors = [{name = "PrusaLapse"}]
 # requires-python = ">=3.10"
 # dependencies = []
 # [tool.orcaslicer.plugin]
 # name = "prusalapse"
 # version = "1.3.1"
+# author = "PrusaLapse"
 # description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
 # ///
 """
