@@ -175,15 +175,41 @@ fs.copyFileSync(path.join(ROOT_DIR, 'deploy', 'DOCKER_DEPLOYMENT.md'), path.join
 console.log('✓ Copied Dockerfile, docker-compose.yml, and DOCKER_DEPLOYMENT.md');
 
 // ============================================================================
-// STEP 6: SHA-256 CHECKSUMS
+// STEP 6: ORCASLICER NATIVE PLUGIN PACKAGE (ZIP)
 // ============================================================================
-console.log('\n--- Step 6: Generating SHA-256 Checksums ---');
+console.log('\n--- Step 6: Packaging OrcaSlicer Native Plugin ---');
+const orcaPluginDir = path.join(ROOT_DIR, 'orcaslicer-plugin', 'prusalapse');
+const orcaZipPath = path.join(RELEASE_DIR, 'prusalapse-orcaslicer-plugin.zip');
+const orcaZip = new AdmZip();
+
+function addPluginFilesRecursively(dir, zipSubDir) {
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === '__pycache__' || entry.name.endsWith('.pyc')) continue;
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      addPluginFilesRecursively(fullPath, path.posix.join(zipSubDir, entry.name));
+    } else if (entry.isFile()) {
+      orcaZip.addLocalFile(fullPath, zipSubDir);
+    }
+  }
+}
+
+addPluginFilesRecursively(orcaPluginDir, 'prusalapse');
+orcaZip.writeZip(orcaZipPath);
+console.log(`✓ Created: ${path.basename(orcaZipPath)} (${(fs.statSync(orcaZipPath).size / 1024).toFixed(1)} KB)`);
+
+// ============================================================================
+// STEP 7: SHA-256 CHECKSUMS
+// ============================================================================
+console.log('\n--- Step 7: Generating SHA-256 Checksums ---');
 const releaseFiles = [
   `PrusaLapse-Setup-${VERSION}.exe`,
   `PrusaLapse-${VERSION}-portable.exe`,
   `PrusaLapse-${VERSION}-linux-x64.tar.gz`,
   `prusalapse-v${VERSION}-server-standalone.zip`,
   `prusalapse-v${VERSION}-firmware.zip`,
+  'prusalapse-orcaslicer-plugin.zip',
   'Dockerfile',
   'docker-compose.yml'
 ];
@@ -203,9 +229,9 @@ fs.writeFileSync(path.join(RELEASE_DIR, 'CHECKSUMS.txt'), checksumsText);
 console.log('✓ Generated: CHECKSUMS.txt');
 
 // ============================================================================
-// STEP 7: RELEASE NOTES
+// STEP 8: RELEASE NOTES
 // ============================================================================
-console.log('\n--- Step 7: Generating Release Notes ---');
+console.log('\n--- Step 8: Generating Release Notes ---');
 const releaseNotes = `# PrusaLapse v${VERSION} Release
 
 **Cinematic Multi-Camera Timelapses for Prusa 3D Printers (MK4 / MK3.9 / MINI / Core One / XL)**
@@ -241,6 +267,17 @@ const releaseNotes = `# PrusaLapse v${VERSION} Release
 * **Smart Z Drop Filtering**: Downward toolhead moves re-lock baseline without triggering false duplicate frames.
 * **Automated USB Flasher**: Includes \`flash-firmware-windows.bat\` and \`flash-firmware-linux.sh\` with automated serial port detection for 1-click flashing.
 
+### 4. OrcaSlicer 2.5+ Native Plugin Integration
+* **Automated G-Code Injection Hook (\`psGCodePostProcess\`)**:
+  * Seamlessly injects toolhead parking moves, settling delays, and camera capture triggers (\`M220 S99\`) during slicing without external post-processing scripts.
+  * Dynamically queries the PrusaLapse server (\`/api/config\`) for parking coordinates and timing, with built-in offline fallback defaults.
+  * Dynamic bed boundary clamping ensures parking stays strictly within physical limits across Prusa MK4, MK3.9, MINI, and XL printers.
+  * Relative extrusion protection (\`M83\`) and binary \`.bgcode\` bypass safety guards.
+* **Integrated Web UI Tab (Page Plugin)**:
+  * Embeds the full PrusaLapse dashboard, live multi-camera feeds, and render queue directly into a dedicated OrcaSlicer tab.
+* **1-Click Web UI & Manual Installation**:
+  * 1-Click installer right inside the PrusaLapse Slicer panel, or manual drop-in via \`prusalapse-orcaslicer-plugin.zip\`.
+
 ---
 
 ## Release Assets & Verification
@@ -252,6 +289,7 @@ const releaseNotes = `# PrusaLapse v${VERSION} Release
 | **\`PrusaLapse-${VERSION}-linux-x64.tar.gz\`** | Portable Desktop | Linux x86_64 | Dedicated native desktop app for Linux distributions |
 | **\`prusalapse-v${VERSION}-server-standalone.zip\`** | Web App / Server | Any Node.js host | Headless server bundle with systemd service unit |
 | **\`prusalapse-v${VERSION}-firmware.zip\`** | Firmware & Tooling | ESP32-CAM | Firmware v1.3.0 binaries & 1-click serial flasher scripts |
+| **\`prusalapse-orcaslicer-plugin.zip\`** | Slicer Plugin | OrcaSlicer 2.5+ (All OS) | Native OrcaSlicer plugin with auto-injection & live tab |
 | **\`Dockerfile\`** | Container | Docker / Podman | Production multi-stage Alpine Dockerfile |
 | **\`docker-compose.yml\`** | Orchestration | Docker Compose | 1-click stack for CasaOS, Unraid, TrueNAS, VPS |
 | **\`CHECKSUMS.txt\`** | Verification | All | Cryptographic SHA-256 hashes for all release artifacts |

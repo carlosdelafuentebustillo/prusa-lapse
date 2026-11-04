@@ -1,0 +1,11 @@
+# PrusaLapse v1.3.0 Release Checksums (SHA-256)
+# Generated: 2026-11-04T22:12:06.082Z
+
+2b7920bbde4b012f8b33c5ac5c7d8746d146e20c631706cbabc6381e4968db5f  PrusaLapse-Setup-1.3.0.exe
+0bbe2d7946bdfcee99f421e0e667ca9f3820fc4e25617f363e62b1cb676cb5ea  PrusaLapse-1.3.0-portable.exe
+3e24e64a1f24d1d073c1e8e2b0c50c5b95138e008229ffc9f2ac3ddb91366194  PrusaLapse-1.3.0-linux-x64.tar.gz
+b6bda2d0b6562f65dd748bf714a1a2d375233ac91d52d1c4ea125a23080b6cb7  prusalapse-v1.3.0-server-standalone.zip
+c948beec88ce7d3b6983b47c4863d7b7a153011521cdc6de6f680d294b468b4d  prusalapse-v1.3.0-firmware.zip
+95d06801603af792ea96f3d422e24bac52772ad00e6c50816dd9c22d0411bf95  prusalapse-orcaslicer-plugin.zip
+904d88b2341fce150b478f5401b86dba644b67c1f832a10f996493aa7adbed30  Dockerfile
+8ec849af2ec5731e467a62fe0c81ce2df47ead94ff6430148b5ad82bf4a4e1ab  docker-compose.yml
