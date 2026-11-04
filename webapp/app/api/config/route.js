@@ -7,8 +7,8 @@ const CONFIG_FILE = path.join(process.cwd(), 'prusa-lapse.config.json');
 
 export async function GET() {
   try {
-    const data = await fs.readFile(CONFIG_FILE, 'utf-8');
-    return NextResponse.json({ config: JSON.parse(data) });
+    const config = await monitor.getConfig();
+    return NextResponse.json({ config: config || {} });
   } catch (error) {
     return NextResponse.json({ config: {} });
   }
