@@ -144,6 +144,36 @@ test('monitor.getConfig() returns default slicer configuration', async () => {
   assert.equal(config.slicer.captureTime, 1200);
 });
 
+test('POST /api/slicer/install returns 400 when OrcaSlicer directory is not found', async () => {
+  const { POST } = require('../app/api/slicer/install/route.js');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'non-existent-orca-'));
+  const origAppData = process.env.APPDATA;
+  const origHome = process.env.HOME;
+  const origUserProfile = process.env.USERPROFILE;
+  const origPluginsDir = process.env.ORCASLICER_PLUGINS_DIR;
+
+  try {
+    delete process.env.ORCASLICER_PLUGINS_DIR;
+    process.env.APPDATA = tempDir;
+    process.env.USERPROFILE = tempDir;
+    process.env.HOME = tempDir;
+
+    // Call POST without customTargetDir or ORCASLICER_PLUGINS_DIR
+    const res = await POST();
+    const data = await res.json();
+
+    assert.equal(res.status, 400);
+    assert.equal(data.success, false);
+    assert.ok(data.error.includes('OrcaSlicer configuration directory not found'));
+  } finally {
+    if (origAppData !== undefined) process.env.APPDATA = origAppData; else delete process.env.APPDATA;
+    if (origHome !== undefined) process.env.HOME = origHome; else delete process.env.HOME;
+    if (origUserProfile !== undefined) process.env.USERPROFILE = origUserProfile; else delete process.env.USERPROFILE;
+    if (origPluginsDir !== undefined) process.env.ORCASLICER_PLUGINS_DIR = origPluginsDir; else delete process.env.ORCASLICER_PLUGINS_DIR;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('monitor.getConfig() preserves existing config and merges slicer defaults', async () => {
   const { monitor } = require('../lib/monitor.js');
   const tempConfigFile = path.join(os.tmpdir(), `test-config-${Date.now()}.json`);

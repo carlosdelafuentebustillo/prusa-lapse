@@ -18,7 +18,15 @@ export async function POST(request) {
       }
     }
 
-    const { targetDir } = customTargetDir ? { targetDir: customTargetDir } : getOrcaSlicerPaths();
+    const orcaPaths = getOrcaSlicerPaths();
+    if (!customTargetDir && !process.env.ORCASLICER_PLUGINS_DIR && !orcaPaths.orcaDirectoryFound) {
+      return Response.json({
+        success: false,
+        error: 'OrcaSlicer configuration directory not found. Please install and launch OrcaSlicer first.'
+      }, { status: 400 });
+    }
+
+    const targetDir = customTargetDir || orcaPaths.targetDir;
     const dest = path.join(targetDir, 'prusalapse');
     const src = getPluginSourceDir();
 
