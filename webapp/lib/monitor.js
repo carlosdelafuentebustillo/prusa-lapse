@@ -4,8 +4,17 @@ import { exec } from 'child_process';
 import { existsSync, createWriteStream } from 'fs';
 import * as tar from 'tar';
 
-const CONFIG_FILE = process.env.PRUSALAPSE_CONFIG_FILE || path.join(process.cwd(), 'prusa-lapse.config.json');
+const getConfigFile = () => process.env.PRUSALAPSE_CONFIG_FILE || path.join(process.cwd(), 'prusa-lapse.config.json');
 const CAPTURES_DIR = process.env.PRUSALAPSE_CAPTURES_DIR || path.join(process.cwd(), 'public', 'captures');
+
+const DEFAULT_SLICER_CONFIG = {
+  autoInjectOrcaSlicer: true,
+  parkX: 240.0,
+  parkY: 210.0,
+  zHopHeight: 0.4,
+  settleTime: 300,
+  captureTime: 1200
+};
 
 function getFFmpegPath() {
   // 1. Explicit environment variable override
@@ -207,7 +216,7 @@ class MonitorService {
           cameraMacs,
           cameraNames
         };
-        await fs.writeFile(CONFIG_FILE, JSON.stringify(updated, null, 2), 'utf-8');
+        await fs.writeFile(getConfigFile(), JSON.stringify(updated, null, 2), 'utf-8');
       }
     } catch {}
 
@@ -269,10 +278,21 @@ class MonitorService {
 
   async getConfig() {
     try {
-      const data = await fs.readFile(CONFIG_FILE, 'utf-8');
-      return JSON.parse(data);
+      const data = await fs.readFile(getConfigFile(), 'utf-8');
+      const parsed = JSON.parse(data) || {};
+      return {
+        ...parsed,
+        slicer: {
+          ...DEFAULT_SLICER_CONFIG,
+          ...(parsed.slicer || {})
+        }
+      };
     } catch (e) {
-      return null;
+      return {
+        slicer: {
+          ...DEFAULT_SLICER_CONFIG
+        }
+      };
     }
   }
 
