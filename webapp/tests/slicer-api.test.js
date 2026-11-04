@@ -205,3 +205,65 @@ test('monitor.getConfig() preserves existing config and merges slicer defaults',
     }
   }
 });
+
+test('getOrcaSlicerPaths correctly resolves macOS paths', async () => {
+  const { getOrcaSlicerPaths } = require('../app/api/slicer/utils.js');
+  const macPaths = getOrcaSlicerPaths({ HOME: '/Users/mockuser' }, 'darwin');
+
+  assert.equal(macPaths.orcaConfigDir, path.join('/Users/mockuser', 'Library', 'Application Support', 'OrcaSlicer'));
+  assert.equal(macPaths.targetDir, path.join('/Users/mockuser', 'Library', 'Application Support', 'OrcaSlicer', 'plugins'));
+  assert.equal(macPaths.pluginDir, path.join('/Users/mockuser', 'Library', 'Application Support', 'OrcaSlicer', 'plugins', 'prusalapse'));
+  assert.equal(macPaths.pluginFile, path.join('/Users/mockuser', 'Library', 'Application Support', 'OrcaSlicer', 'plugins', 'prusalapse', 'plugin.py'));
+});
+
+test('POST /api/config honors PRUSALAPSE_CONFIG_FILE and deep merges slicer config', async () => {
+  const { POST } = require('../app/api/config/route.js');
+  const tempConfigFile = path.join(os.tmpdir(), `test-api-config-${Date.now()}.json`);
+  const origEnv = process.env.PRUSALAPSE_CONFIG_FILE;
+
+  try {
+    process.env.PRUSALAPSE_CONFIG_FILE = tempConfigFile;
+
+    // Seed existing config file
+    fs.writeFileSync(tempConfigFile, JSON.stringify({
+      prusaIp: '192.168.1.50',
+      slicer: {
+        parkX: 200.0,
+        parkY: 180.0,
+        autoInjectOrcaSlicer: true
+      }
+    }));
+
+    const mockReq = {
+      json: async () => ({
+        slicer: {
+          autoInjectOrcaSlicer: false
+        }
+      })
+    };
+
+    const res = await POST(mockReq);
+    const data = await res.json();
+
+    assert.equal(data.success, true);
+    assert.equal(data.config.prusaIp, '192.168.1.50');
+    assert.equal(data.config.slicer.autoInjectOrcaSlicer, false);
+    assert.equal(data.config.slicer.parkX, 200.0);
+    assert.equal(data.config.slicer.parkY, 180.0);
+
+    // Verify written file on disk matches tempConfigFile
+    const fileContent = JSON.parse(fs.readFileSync(tempConfigFile, 'utf-8'));
+    assert.equal(fileContent.prusaIp, '192.168.1.50');
+    assert.equal(fileContent.slicer.autoInjectOrcaSlicer, false);
+    assert.equal(fileContent.slicer.parkX, 200.0);
+  } finally {
+    if (origEnv !== undefined) {
+      process.env.PRUSALAPSE_CONFIG_FILE = origEnv;
+    } else {
+      delete process.env.PRUSALAPSE_CONFIG_FILE;
+    }
+    if (fs.existsSync(tempConfigFile)) {
+      fs.unlinkSync(tempConfigFile);
+    }
+  }
+});

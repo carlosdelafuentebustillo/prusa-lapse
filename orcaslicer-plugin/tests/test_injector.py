@@ -77,6 +77,7 @@ class TestGCodeInjector(unittest.TestCase):
         self.assertIn("M220 S99", modified)
         self.assertIn("G1 X240.0 Y200.0 F9000", modified)
         self.assertIn("M83 ; Strict relative extrusion", modified)
+        self.assertIn("G1 F9000 ; Restore normal travel feedrate", modified)
         self.assertIn("M220 S100", modified)
 
     def test_layer_change_fallback_marker(self):

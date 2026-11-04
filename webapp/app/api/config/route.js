@@ -1,25 +1,25 @@
-import { NextResponse } from 'next/server';
 import fs from 'fs/promises';
 import path from 'path';
-import { monitor } from '../../../lib/monitor';
+import { monitor } from '../../../lib/monitor.js';
 
-const CONFIG_FILE = path.join(process.cwd(), 'prusa-lapse.config.json');
+const getConfigFile = () => process.env.PRUSALAPSE_CONFIG_FILE || path.join(process.cwd(), 'prusa-lapse.config.json');
 
 export async function GET() {
   try {
     const config = await monitor.getConfig();
-    return NextResponse.json({ config: config || {} });
+    return Response.json({ config: config || {} });
   } catch (error) {
-    return NextResponse.json({ config: {} });
+    return Response.json({ config: {} });
   }
 }
 
 export async function POST(request) {
   try {
     const incoming = await request.json();
+    const configFile = getConfigFile();
     let existing = {};
     try {
-      const raw = await fs.readFile(CONFIG_FILE, 'utf-8');
+      const raw = await fs.readFile(configFile, 'utf-8');
       existing = JSON.parse(raw) || {};
     } catch {}
 
@@ -33,15 +33,19 @@ export async function POST(request) {
       cameraNames: {
         ...(existing.cameraNames || {}),
         ...(incoming.cameraNames || {})
+      },
+      slicer: {
+        ...(existing.slicer || {}),
+        ...(incoming.slicer || {})
       }
     };
-    await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2));
+    await fs.writeFile(configFile, JSON.stringify(config, null, 2));
     
     // Log configuration changes
     monitor.log(`Configuration saved (Prusa IP: ${config.prusaIp || 'None'}, ${config.cameraIps ? config.cameraIps.length : 0} cameras)`, 'success');
     
-    return NextResponse.json({ success: true, config });
+    return Response.json({ success: true, config });
   } catch (error) {
-    return NextResponse.json({ error: 'Failed to save config' }, { status: 500 });
+    return Response.json({ error: 'Failed to save config' }, { status: 500 });
   }
 }

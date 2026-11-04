@@ -38,7 +38,11 @@ export async function POST(request) {
     }
 
     fs.mkdirSync(targetDir, { recursive: true });
-    fs.cpSync(src, dest, { recursive: true, force: true });
+    fs.cpSync(src, dest, {
+      recursive: true,
+      force: true,
+      filter: (srcPath) => !srcPath.includes('__pycache__') && !srcPath.endsWith('.pyc')
+    });
 
     return Response.json({
       success: true,

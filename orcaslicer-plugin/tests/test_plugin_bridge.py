@@ -113,6 +113,32 @@ class TestPluginBridge(unittest.TestCase):
             self.assertIn("G4 P450 ; Settle delay", content)
             self.assertIn("G4 P1500 ; Dwell for multi-camera capture", content)
 
+    @patch("urllib.request.urlopen")
+    def test_process_slicing_file_remote_auto_inject_disabled(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps({
+            "config": {
+                "slicer": {
+                    "autoInjectOrcaSlicer": False,
+                }
+            }
+        }).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        gcode_path = os.path.join(self.temp_dir.name, "test_remote_disabled.gcode")
+        initial_content = "; bed_shape = 0x0,250x0,250x210,0x210\n;AFTER_LAYER_CHANGE\nG1 X10 Y10\n"
+        with open(gcode_path, "w", encoding="utf-8") as f:
+            f.write(initial_content)
+
+        save_local_config({"host": "http://127.0.0.1:3000", "enabled": True}, self.config_path)
+        result = process_slicing_file(gcode_path, self.config_path)
+
+        self.assertEqual(result["status"], "skipped_disabled")
+        with open(gcode_path, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), initial_content)
+
     def test_page_capability_ui_and_message(self):
         page = PrusaLapsePage(config_path=self.config_path)
         self.assertEqual(page.get_name(), "PrusaLapse")
@@ -122,10 +148,17 @@ class TestPluginBridge(unittest.TestCase):
         self.assertIn('src="http://myprinter:3000"', html)
         self.assertIn("postMessage", html)
 
-        # Test updating host via message bridge
+        # Test updating host via message bridge (type: save_config)
         page.on_message({"type": "save_config", "host": "http://newhost:3000"})
         loaded = load_local_config(self.config_path)
         self.assertEqual(loaded["host"], "http://newhost:3000")
+        self.assertTrue(loaded["enabled"])
+
+        # Test updating enabled independently of host (action: save_config parity)
+        page.on_message({"action": "save_config", "enabled": False})
+        loaded_after = load_local_config(self.config_path)
+        self.assertEqual(loaded_after["host"], "http://newhost:3000")
+        self.assertFalse(loaded_after["enabled"])
 
     def test_slicing_hook_capability(self):
         hook = PrusaLapseSlicingHook(config_path=self.config_path)

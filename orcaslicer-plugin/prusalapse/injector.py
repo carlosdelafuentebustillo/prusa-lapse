@@ -186,6 +186,7 @@ def inject_timelapse_gcode(
             "G91 ; Relative positioning",
             f"G1 Z-{z_hop:.1f} F600 ; Restore Z height",
             "G90 ; Absolute positioning",
+            "G1 F9000 ; Restore normal travel feedrate",
         ])
     snippet_lines.append(END_MARKER)
 

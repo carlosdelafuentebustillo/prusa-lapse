@@ -251,6 +251,22 @@ def process_slicing_file(
             injection_cfg.update(remote_cfg["slicer"])
         injection_cfg.update(remote_cfg)
 
+    # Check if auto-injection was disabled locally or remotely
+    if (
+        not injection_cfg.get("enabled", True)
+        or not injection_cfg.get("autoInjectOrcaSlicer", True)
+        or not injection_cfg.get("auto_inject_orcaslicer", True)
+    ):
+        return {"status": "skipped_disabled"}
+
+    slicer_cfg = injection_cfg.get("slicer")
+    if isinstance(slicer_cfg, dict):
+        if (
+            not slicer_cfg.get("autoInjectOrcaSlicer", True)
+            or not slicer_cfg.get("auto_inject_orcaslicer", True)
+        ):
+            return {"status": "skipped_disabled"}
+
     gcode_text = raw_bytes.decode("utf-8", errors="replace")
     modified_text, count = inject_timelapse_gcode(gcode_text, injection_cfg)
 
@@ -331,14 +347,19 @@ class PrusaLapsePage(orca.pages.PagesPluginCapabilityBase):
             except Exception:
                 return
 
-        if isinstance(message, dict) and message.get("type") == "save_config":
-            new_host = message.get("host")
-            if new_host:
+        if isinstance(message, dict):
+            msg_type = message.get("type") or message.get("action")
+            if msg_type == "save_config":
                 cfg = load_local_config(self.config_path)
-                cfg["host"] = new_host
+                changed = False
+                if "host" in message and message.get("host"):
+                    cfg["host"] = str(message["host"])
+                    changed = True
                 if "enabled" in message:
                     cfg["enabled"] = bool(message["enabled"])
-                save_local_config(cfg, self.config_path)
+                    changed = True
+                if changed:
+                    save_local_config(cfg, self.config_path)
 
 
 class PrusaLapseSlicingHook(orca.slicing.SlicingPipelineCapabilityBase):
