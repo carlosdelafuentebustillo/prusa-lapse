@@ -174,7 +174,27 @@ function createWindow() {
     show: false, // Show once ready-to-show to prevent white flash
     webPreferences: {
       nodeIntegration: false,
-      contextIsolation: true
+      contextIsolation: true,
+      devTools: true
+    }
+  });
+
+  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    const msg = (event && typeof event === 'object' && 'message' in event) ? event.message : message;
+    const lvl = (event && typeof event === 'object' && 'level' in event) ? event.level : level;
+    const src = (event && typeof event === 'object' && 'sourceId' in event) ? event.sourceId : sourceId;
+    const ln = (event && typeof event === 'object' && 'lineNumber' in event) ? event.lineNumber : line;
+    console.log(`[Renderer Console L${lvl}] ${msg} (${src}:${ln})`);
+  });
+
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
+    console.error(`[Renderer Did Fail Load] ${errorCode}: ${errorDescription} (${validatedURL})`);
+  });
+
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.key === 'F12' && input.type === 'keyDown') {
+      mainWindow.webContents.toggleDevTools();
+      event.preventDefault();
     }
   });
 

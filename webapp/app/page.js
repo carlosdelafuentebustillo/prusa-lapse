@@ -1084,9 +1084,21 @@ export default function Home() {
       }
     } catch (e) {
       clearTimeout(earlyRefreshTimer);
-      // If the client connection closed or timed out while downloading frames,
-      // background polling will continue updating progress and notify completion.
       console.warn('Sync connection closed or timed out:', e.message);
+      fetch('/api/monitor')
+        .then(r => r.json())
+        .then(data => {
+          if (!data.fetchStatus?.isFetching) {
+            setFetchingSessionId(null);
+            setFetchStatus(null);
+            prevFetchingRef.current = false;
+          }
+        })
+        .catch(() => {
+          setFetchingSessionId(null);
+          setFetchStatus(null);
+          prevFetchingRef.current = false;
+        });
     } finally {
       isFetchRequestInFlightRef.current = false;
     }

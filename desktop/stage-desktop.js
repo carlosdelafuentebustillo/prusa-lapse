@@ -8,13 +8,32 @@ const desktopApp = path.join(rootDir, 'desktop', 'app');
 const desktopBin = path.join(rootDir, 'desktop', 'bin');
 
 console.log('[Desktop Stager] Preparing desktop staging directories...');
-if (!fs.existsSync(desktopApp)) fs.mkdirSync(desktopApp, { recursive: true });
-if (!fs.existsSync(desktopBin)) fs.mkdirSync(desktopBin, { recursive: true });
+if (fs.existsSync(desktopApp)) {
+  fs.rmSync(desktopApp, { recursive: true, force: true });
+}
+fs.mkdirSync(desktopApp, { recursive: true });
+if (!fs.existsSync(desktopBin)) {
+  fs.mkdirSync(desktopBin, { recursive: true });
+}
 
 console.log('[Desktop Stager] Copying standalone bundle to desktop/app...');
-execSync(`powershell -NoProfile -Command "Copy-Item -Path '${standaloneDir}\\*' -Destination '${desktopApp}' -Recurse -Force"`);
-execSync(`powershell -NoProfile -Command "Copy-Item -Path '${path.join(rootDir, 'webapp', '.next', 'static')}' -Destination '${path.join(desktopApp, '.next', 'static')}' -Recurse -Force"`);
-execSync(`powershell -NoProfile -Command "Copy-Item -Path '${path.join(rootDir, 'webapp', 'public')}' -Destination '${path.join(desktopApp, 'public')}' -Recurse -Force"`);
+fs.cpSync(standaloneDir, desktopApp, { recursive: true });
+
+console.log('[Desktop Stager] Copying .next/static into desktop/app/.next/static...');
+const srcStatic = path.join(rootDir, 'webapp', '.next', 'static');
+const destStatic = path.join(desktopApp, '.next', 'static');
+if (fs.existsSync(destStatic)) {
+  fs.rmSync(destStatic, { recursive: true, force: true });
+}
+fs.cpSync(srcStatic, destStatic, { recursive: true });
+
+console.log('[Desktop Stager] Copying public into desktop/app/public...');
+const srcPublic = path.join(rootDir, 'webapp', 'public');
+const destPublic = path.join(desktopApp, 'public');
+if (fs.existsSync(destPublic)) {
+  fs.rmSync(destPublic, { recursive: true, force: true });
+}
+fs.cpSync(srcPublic, destPublic, { recursive: true });
 
 console.log('[Desktop Stager] Copying ffmpeg and curl binaries to desktop/bin...');
 const ffmpegSrc = path.join(rootDir, 'webapp', 'node_modules', '@ffmpeg-installer', 'win32-x64', 'ffmpeg.exe');
