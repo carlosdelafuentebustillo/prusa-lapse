@@ -299,6 +299,9 @@ export default function Home() {
   const [currentSession, setCurrentSession] = useState(null);
   const logBoxRef = useRef(null);
   const [cameraSettings, setCameraSettings] = useState({});
+  const [isBackendRecording, setIsBackendRecording] = useState(false);
+  const activePrintCamera = Object.values(cameraSettings).find(c => c && (c.printer_state === 'PRINTING' || c.printer_state === 'PAUSED'));
+  const isTimelapseRecording = Boolean(isMonitoring || isBackendRecording || activePrintCamera);
   const [printerOfflineWarning, setPrinterOfflineWarning] = useState(false);
   const [configCollapsed, setConfigCollapsed] = useState(true);
   const [showLogs, setShowLogs] = useState(false);
@@ -677,6 +680,9 @@ export default function Home() {
           if (data.isRunning !== undefined) {
             setIsMonitoring(data.isRunning);
           }
+          if (data.isRecording !== undefined) {
+            setIsBackendRecording(Boolean(data.isRecording));
+          }
           if (data.fetchStatus !== undefined) {
             if (data.fetchStatus?.isFetching) {
               prevFetchingRef.current = true;
@@ -1011,6 +1017,10 @@ export default function Home() {
   };
 
   const handleFetchOffline = async (session) => {
+    if (isTimelapseRecording) {
+      addToast('Sync actions are disabled while a timelapse is actively recording.', 'warning');
+      return;
+    }
     if (isMonitoring) {
       addToast('Please stop Live Sync first.', 'warning');
       return;
@@ -1105,6 +1115,10 @@ export default function Home() {
   };
 
   const handleWipeSD = async () => {
+    if (isTimelapseRecording) {
+      addToast('Cannot wipe SD cards while a timelapse is actively recording.', 'warning');
+      return;
+    }
     showConfirm(
       'Wipe all timelapse files stored on the camera SD cards?',
       async () => {
@@ -1159,8 +1173,7 @@ export default function Home() {
   const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
   const todayDateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
-  // Check if any camera reports an active print
-  const activePrintCamera = Object.values(cameraSettings).find(c => c && (c.printer_state === 'PRINTING' || c.printer_state === 'PAUSED'));
+  // Active print name from active camera
   const activePrintName = activePrintCamera?.job_name
     ? activePrintCamera.job_name.replace(/\.(bgcode|gcode|gco)$/i, '').replace(/_/g, ' ')
     : null;
@@ -1465,10 +1478,10 @@ export default function Home() {
                 {(isCurrentFetching || displayPercent < 100) ? (
                   <button
                     className={`btn btn-small ${totalFramesLocal > 0 && !isCurrentFetching ? 'btn-secondary' : 'btn-primary'}`}
-                    style={{ width: 'auto', padding: '5px 12px', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
-                    disabled={isMonitoring || isCurrentFetching || Boolean(fetchStatus?.isFetching) || fetchingSessionId !== null}
+                    style={{ width: 'auto', padding: '5px 12px', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '6px', opacity: isTimelapseRecording ? 0.45 : 1 }}
+                    disabled={isTimelapseRecording || isMonitoring || isCurrentFetching || Boolean(fetchStatus?.isFetching) || fetchingSessionId !== null}
                     onClick={() => handleFetchOffline(session)}
-                    title={totalFramesLocal > 0 ? 'Resume downloading missing frames from SD card' : 'Sync session frames from camera SD card'}
+                    title={isTimelapseRecording ? 'Sync actions are disabled while a timelapse is actively recording to avoid camera conflicts' : (totalFramesLocal > 0 ? 'Resume downloading missing frames from SD card' : 'Sync session frames from camera SD card')}
                   >
                     {isCurrentFetching ? (
                       <>
@@ -1482,10 +1495,10 @@ export default function Home() {
                 ) : (
                   <button
                     className="btn btn-ghost btn-small"
-                    style={{ width: 'auto', padding: '4px 10px', fontSize: '0.72rem', opacity: 0.7 }}
-                    disabled={isMonitoring || fetchStatus?.isFetching || fetchingSessionId !== null}
+                    style={{ width: 'auto', padding: '4px 10px', fontSize: '0.72rem', opacity: isTimelapseRecording ? 0.35 : 0.7 }}
+                    disabled={isTimelapseRecording || isMonitoring || fetchStatus?.isFetching || fetchingSessionId !== null}
                     onClick={() => handleFetchOffline(session)}
-                    title="Re-verify or re-sync frames from camera SD card"
+                    title={isTimelapseRecording ? 'Sync actions are disabled while a timelapse is actively recording to avoid camera conflicts' : 'Re-verify or re-sync frames from camera SD card'}
                   >
                     Re-sync
                   </button>
@@ -1493,6 +1506,14 @@ export default function Home() {
               </div>
             )}
           </div>
+
+          {/* Active recording lock notice for inactive sessions */}
+          {isTimelapseRecording && !session.isActive && (
+            <div style={{ marginTop: '8px', padding: '6px 10px', background: 'rgba(234, 179, 8, 0.08)', border: '1px solid rgba(234, 179, 8, 0.22)', borderRadius: '6px', fontSize: '0.72rem', color: '#facc15', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span>🔒</span>
+              <span>Syncing is disabled while a timelapse is actively recording to avoid camera SD conflicts.</span>
+            </div>
+          )}
 
           {/* Sub-status: Active camera frame counts for active print */}
           {session.isActive && session.cameras && session.cameras.length > 0 && (
@@ -1927,7 +1948,13 @@ export default function Home() {
                 <button className="btn btn-ghost btn-small" style={{ flex: 1, minWidth: '120px', padding: '9px' }} onClick={handleAutoDetect} disabled={isDetecting}>
                   {isDetecting ? 'Scanning…' : 'Auto-detect Devices'}
                 </button>
-                <button className="btn btn-ghost btn-small" style={{ width: 'auto', padding: '9px 14px', color: 'var(--color-danger)' }} onClick={handleWipeSD}>
+                <button
+                  className="btn btn-ghost btn-small"
+                  style={{ width: 'auto', padding: '9px 14px', color: 'var(--color-danger)', opacity: isTimelapseRecording ? 0.4 : 1 }}
+                  onClick={handleWipeSD}
+                  disabled={isTimelapseRecording}
+                  title={isTimelapseRecording ? 'Cannot wipe camera SD cards while a timelapse is actively recording' : 'Wipe all timelapse files stored on the camera SD cards'}
+                >
                   Wipe Camera SD Cards
                 </button>
               </div>

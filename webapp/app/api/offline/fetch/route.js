@@ -29,6 +29,14 @@ export async function POST(request) {
       });
     }
 
+    const recordingCheck = await monitor.isTimelapseRecording();
+    if (recordingCheck.isRecording) {
+      return NextResponse.json({
+        success: false,
+        error: `Sync actions are not permitted while a timelapse is actively recording (${recordingCheck.reason || 'Print in progress'}).`
+      }, { status: 409 });
+    }
+
     const result = await monitor.fetchOfflineSession(targetSessionIds, sessionTimestamp, jobName, jobId, remoteSessionId, remoteFrameCounts);
     if (!result.success) {
       return NextResponse.json({ success: false, error: result.error, sessionId: result.sessionId }, { status: 400 });

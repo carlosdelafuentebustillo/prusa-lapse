@@ -1,13 +1,13 @@
 # /// script
 # name = "prusalapse"
-# version = "1.3.4"
+# version = "1.3.5"
 # description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
 # authors = [{name = "PrusaLapse"}]
 # requires-python = ">=3.10"
 # dependencies = []
 # [tool.orcaslicer.plugin]
 # name = "prusalapse"
-# version = "1.3.4"
+# version = "1.3.5"
 # author = "PrusaLapse"
 # description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
 # ///
@@ -917,7 +917,7 @@ _BasePluginClass = getattr(orca, "base", object)
 class PrusaLapsePlugin(_BasePluginClass):
     id = "prusalapse"
     name = "PrusaLapse"
-    version = "1.3.4"
+    version = "1.3.5"
     description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
     author = "PrusaLapse"
     page = PrusaLapsePage

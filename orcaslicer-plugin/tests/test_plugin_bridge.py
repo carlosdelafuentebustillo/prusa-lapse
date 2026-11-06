@@ -241,7 +241,7 @@ class TestPluginBridge(unittest.TestCase):
     def test_plugin_lifecycle(self):
         plugin = PrusaLapsePlugin()
         self.assertEqual(plugin.id, "prusalapse")
-        self.assertEqual(plugin.version, "1.3.2")
+        self.assertEqual(plugin.version, "1.3.5")
         with patch("prusalapse.plugin.ensure_server_running") as mock_ensure:
             plugin.on_load()
             mock_ensure.assert_called_once()

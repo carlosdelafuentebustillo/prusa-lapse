@@ -222,6 +222,7 @@ class MonitorService {
     this.fetchStatus = null;
     this.knownCameraMacs = {};
     this.knownCameraNames = {};
+    this.knownCameraPrinterStates = {};
     this.log('PrusaLapse Webapp System initialized. Awaiting commands...', 'info');
   }
 
@@ -249,6 +250,15 @@ class MonitorService {
     if (camName) {
       this.knownCameraNames[ip] = camName;
       if (mac) this.knownCameraNames[mac] = camName;
+    }
+
+    if (data.printer_state) {
+      this.knownCameraPrinterStates[ip] = {
+        state: String(data.printer_state).toUpperCase(),
+        jobName: data.job_name || null,
+        jobId: data.job_id || null,
+        updatedAt: Date.now()
+      };
     }
 
     if (!mac && !camName) return null;
@@ -799,10 +809,88 @@ class MonitorService {
     this.log(`PC Backup Sync stopped. Synced ${this.frameCount} frames to local PC.`, 'info');
   }
 
+  async isTimelapseRecording() {
+    // 1. Live PC Monitoring is active
+    if (this.isRunning) {
+      return {
+        isRecording: true,
+        reason: 'Live PC Sync monitoring is actively capturing frames'
+      };
+    }
+
+    // 2. Simulated/fake print is active
+    if (this.fakePrintActive) {
+      return {
+        isRecording: true,
+        reason: 'A test print session is actively recording'
+      };
+    }
+
+    // 3. Check recently recorded camera printer states (within last 30 seconds)
+    const now = Date.now();
+    for (const [ip, info] of Object.entries(this.knownCameraPrinterStates || {})) {
+      if (now - (info.updatedAt || 0) < 30000) {
+        if (info.state === 'PRINTING' || info.state === 'PAUSED') {
+          return {
+            isRecording: true,
+            reason: `Camera (${ip}) is actively recording a print (${info.jobName || 'Print in progress'})`,
+            jobName: info.jobName,
+            jobId: info.jobId
+          };
+        }
+      }
+    }
+
+    // 4. Quick check on configured cameras (short 1200ms timeout)
+    try {
+      const config = await this.getConfig();
+      if (config && config.cameraIps && config.cameraIps.length > 0) {
+        const checks = await Promise.allSettled(
+          config.cameraIps.map(async (ip) => {
+            const ctrl = new AbortController();
+            const t = setTimeout(() => ctrl.abort(), 1200);
+            const res = await fetch(`http://${ip}/camera_status`, { signal: ctrl.signal });
+            clearTimeout(t);
+            if (res.ok) {
+              const data = await res.json();
+              this.recordCameraIdentity(ip, data).catch(() => {});
+              const st = (data.printer_state || '').toUpperCase();
+              if (st === 'PRINTING' || st === 'PAUSED') {
+                return { isPrinting: true, ip, jobName: data.job_name, jobId: data.job_id };
+              }
+            }
+            return { isPrinting: false };
+          })
+        );
+
+        for (const c of checks) {
+          if (c.status === 'fulfilled' && c.value && c.value.isPrinting) {
+            return {
+              isRecording: true,
+              reason: `Camera (${c.value.ip}) is actively recording a print (${c.value.jobName || 'Print in progress'})`,
+              jobName: c.value.jobName,
+              jobId: c.value.jobId
+            };
+          }
+        }
+      }
+    } catch (e) {
+      // Ignore network errors during fast check
+    }
+
+    return { isRecording: false, reason: null };
+  }
+
   async fetchOfflineSession(targetSessionIds = null, sessionTimestamp = null, jobName = null, jobId = null, remoteSessionId = null, remoteFrameCounts = null) {
     if (this.isCompiling) {
       this.log('Cannot fetch offline session while compiling.', 'error');
       throw new Error('Monitor is busy compiling');
+    }
+
+    const recordingCheck = await this.isTimelapseRecording();
+    if (recordingCheck.isRecording) {
+      this.log(`Sync request rejected: Cannot sync while timelapse is actively recording (${recordingCheck.reason}).`, 'warning');
+      throw new Error(`Sync actions are disabled while a timelapse is actively recording (${recordingCheck.reason}).`);
     }
 
     if (this.fetchStatus && this.fetchStatus.isFetching) {
@@ -1230,6 +1318,12 @@ class MonitorService {
   }
 
   async wipeOfflineSD() {
+    const recordingCheck = await this.isTimelapseRecording();
+    if (recordingCheck.isRecording) {
+      this.log(`Wipe SD rejected: Cannot wipe while timelapse is actively recording (${recordingCheck.reason}).`, 'warning');
+      return { success: false, error: `Cannot wipe camera SD cards while a timelapse is actively recording (${recordingCheck.reason}).` };
+    }
+
     const config = await this.getConfig();
     if (!config || !config.cameraIps || config.cameraIps.length === 0) {
       this.log('Cannot wipe: No cameras configured.', 'error');
@@ -1270,8 +1364,25 @@ class MonitorService {
   }
 
   getStatus() {
+    const now = Date.now();
+    let cameraRecording = false;
+    let recordingJobName = null;
+    let recordingJobId = null;
+    for (const [ip, info] of Object.entries(this.knownCameraPrinterStates || {})) {
+      if (now - (info.updatedAt || 0) < 30000 && (info.state === 'PRINTING' || info.state === 'PAUSED')) {
+        cameraRecording = true;
+        recordingJobName = info.jobName;
+        recordingJobId = info.jobId;
+        break;
+      }
+    }
+    const isRecording = this.isRunning || this.fakePrintActive || cameraRecording;
+
     return {
       isRunning: this.isRunning,
+      isRecording,
+      recordingJobName,
+      recordingJobId,
       currentSession: this.currentSession,
       frameCount: this.frameCount,
       isCompiling: this.isCompiling,

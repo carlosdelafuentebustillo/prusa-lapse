@@ -22,7 +22,7 @@ int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 3
-#define FIRMWARE_VERSION "v1.3.0"
+#define FIRMWARE_VERSION "v1.3.1"
 
 String deviceMacHex = "";
 String getDeviceMacHex() {
@@ -1546,7 +1546,14 @@ void setupWebServer() {
     last_sd_download_time = millis();
     if (!sdCardAvailable) { request->send(503, "text/plain", "SD Card not available"); return; }
     if (request->hasArg("file")) {
-      String filename = "/lapse/" + request->arg("file");
+      String fileArg = request->arg("file");
+      String filename = "/lapse/" + fileArg;
+
+      // Prevent downloading heavy frame/tar files during active timelapse recording to avoid SD & SPI bus contention
+      if ((currentPrinterState == "PRINTING" || currentPrinterState == "PAUSED") && !fileArg.endsWith(".jsonl")) {
+        request->send(409, "text/plain", "Sync actions are disabled while timelapse is actively recording");
+        return;
+      }
 
       if (sd_mutex && xSemaphoreTake(sd_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
         request->send(503, "text/plain", "SD Card busy");
@@ -1641,6 +1648,10 @@ void setupWebServer() {
 
   server.on("/delete_session_sd", HTTP_GET, [](AsyncWebServerRequest *request){
     if (!sdCardAvailable) { request->send(503, "text/plain", "SD Card not available"); return; }
+    if (currentPrinterState == "PRINTING" || currentPrinterState == "PAUSED") {
+      request->send(409, "text/plain", "Cannot delete session while timelapse is actively recording");
+      return;
+    }
     if (!request->hasArg("session")) { request->send(400, "text/plain", "Missing session parameter"); return; }
     String sessionParam = request->arg("session"); // e.g. "s0001"
     if (sd_mutex && xSemaphoreTake(sd_mutex, pdMS_TO_TICKS(3000)) == pdTRUE) {
@@ -1700,6 +1711,10 @@ void setupWebServer() {
 
   server.on("/wipe_sd", HTTP_GET, [](AsyncWebServerRequest *request){
     if (!sdCardAvailable) { request->send(503, "text/plain", "SD Card not available"); return; }
+    if (currentPrinterState == "PRINTING" || currentPrinterState == "PAUSED") {
+      request->send(409, "text/plain", "Cannot wipe SD card while timelapse is actively recording");
+      return;
+    }
     offlineFrameCount = 0;
     sessionId = 0;
     preferences.begin("prusalapse", false);
