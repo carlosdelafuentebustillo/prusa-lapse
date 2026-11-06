@@ -83,13 +83,12 @@ const publicSrc = path.join(ROOT_DIR, 'webapp', 'public');
 const publicDest = path.join(standaloneDir, 'public');
 
 // Copy static assets into standalone bundle
-if (!fs.existsSync(nextStaticDest)) {
-  console.log('  Copying static assets into standalone bundle...');
-  execSync(`powershell -NoProfile -Command "Copy-Item -Path '${nextStaticSrc}' -Destination '${nextStaticDest}' -Recurse -Force"`);
-}
-if (!fs.existsSync(publicDest)) {
-  execSync(`powershell -NoProfile -Command "Copy-Item -Path '${publicSrc}' -Destination '${publicDest}' -Recurse -Force"`);
-}
+console.log('  Copying static assets into standalone bundle...');
+if (fs.existsSync(nextStaticDest)) fs.rmSync(nextStaticDest, { recursive: true, force: true });
+fs.cpSync(nextStaticSrc, nextStaticDest, { recursive: true });
+
+if (fs.existsSync(publicDest)) fs.rmSync(publicDest, { recursive: true, force: true });
+fs.cpSync(publicSrc, publicDest, { recursive: true });
 
 // ============================================================================
 // STEP 3: SERVER STANDALONE PACKAGE (ZIP)
@@ -100,7 +99,7 @@ if (fs.existsSync(serverStageDir)) fs.rmSync(serverStageDir, { recursive: true, 
 fs.mkdirSync(serverStageDir, { recursive: true });
 
 // Copy standalone directory contents
-execSync(`powershell -NoProfile -Command "Copy-Item -Path '${standaloneDir}\\*' -Destination '${serverStageDir}' -Recurse -Force"`);
+fs.cpSync(standaloneDir, serverStageDir, { recursive: true });
 
 // Add systemd service and docker files to server bundle
 const deployDir = path.join(serverStageDir, 'deploy');
