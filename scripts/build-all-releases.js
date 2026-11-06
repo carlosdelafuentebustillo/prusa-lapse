@@ -4,7 +4,8 @@ const { execSync } = require('child_process');
 const crypto = require('crypto');
 const AdmZip = require('../webapp/node_modules/adm-zip');
 
-const VERSION = '1.3.0';
+const pkg = require('../webapp/package.json');
+const VERSION = pkg.version;
 const ROOT_DIR = path.resolve(__dirname, '..');
 const RELEASE_DIR = path.join(ROOT_DIR, 'releases', `v${VERSION}`);
 const STAGING_DIR = path.join(ROOT_DIR, 'dist', 'staging');
@@ -33,7 +34,7 @@ function computeSha256(filePath) {
 // ============================================================================
 // STEP 1: ESP32-CAM FIRMWARE RELEASE PACKAGE
 // ============================================================================
-console.log('\n--- Step 1: Packaging ESP32-CAM Firmware v1.3.0 ---');
+console.log(`\n--- Step 1: Packaging ESP32-CAM Firmware v${VERSION} ---`);
 const pioBuildDir = path.join(ROOT_DIR, 'firmware', '.pio', 'build', 'esp32cam');
 const fwBin = path.join(pioBuildDir, 'firmware.bin');
 const blBin = path.join(pioBuildDir, 'bootloader.bin');
@@ -261,7 +262,7 @@ const releaseNotes = `# PrusaLapse v${VERSION} Release
   * Minified Next.js standalone build that boots in <50ms with \`node server.js\`.
   * Includes Linux \`systemd\` service unit (\`prusalapse.service\`) for headless Raspberry Pi / home server background execution.
 
-### 3. Firmware v1.3.0 (ESP32-CAM)
+### 3. Firmware (ESP32-CAM)
 * **High-Speed Paced Polling (400ms – 550ms)**: Eliminates the polling race condition across multiple cameras, guaranteeing 100% layer trigger detection inside parked G-code dwell windows (\`M220 S99\`).
 * **Nextruder MBL Probing Guard**: Suppresses false trigger bursts during the MK4/MK3.9 170°C load-cell bed leveling routine.
 * **Smart Z Drop Filtering**: Downward toolhead moves re-lock baseline without triggering false duplicate frames.
@@ -288,7 +289,7 @@ const releaseNotes = `# PrusaLapse v${VERSION} Release
 | **\`PrusaLapse-${VERSION}-portable.exe\`** | Portable Desktop | Windows 10/11 x64 | Single-file zero-install dedicated desktop app |
 | **\`PrusaLapse-${VERSION}-linux-x64.tar.gz\`** | Portable Desktop | Linux x86_64 | Dedicated native desktop app for Linux distributions |
 | **\`prusalapse-v${VERSION}-server-standalone.zip\`** | Web App / Server | Any Node.js host | Headless server bundle with systemd service unit |
-| **\`prusalapse-v${VERSION}-firmware.zip\`** | Firmware & Tooling | ESP32-CAM | Firmware v1.3.0 binaries & 1-click serial flasher scripts |
+| **\`prusalapse-v${VERSION}-firmware.zip\`** | Firmware & Tooling | ESP32-CAM | Firmware binaries & 1-click serial flasher scripts |
 | **\`prusalapse-orcaslicer-plugin.zip\`** | Slicer Plugin | OrcaSlicer 2.5+ (All OS) | Native OrcaSlicer plugin with auto-injection & live tab |
 | **\`Dockerfile\`** | Container | Docker / Podman | Production multi-stage Alpine Dockerfile |
 | **\`docker-compose.yml\`** | Orchestration | Docker Compose | 1-click stack for CasaOS, Unraid, TrueNAS, VPS |
