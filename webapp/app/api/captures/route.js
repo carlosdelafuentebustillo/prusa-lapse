@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { getCapturesDir } from '../../../lib/monitor';
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
@@ -22,7 +23,7 @@ export async function GET(request) {
     return new Response('Invalid path', { status: 400 });
   }
 
-  const filePath = path.join(process.cwd(), 'public', 'captures', session, file);
+  const filePath = path.join(getCapturesDir(), session, file);
 
   if (!fs.existsSync(filePath)) {
     return new Response('File not found', { status: 404 });

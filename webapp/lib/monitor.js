@@ -4,8 +4,57 @@ import { exec } from 'child_process';
 import { existsSync, createWriteStream } from 'fs';
 import * as tar from 'tar';
 
-const getConfigFile = () => process.env.PRUSALAPSE_CONFIG_FILE || path.join(process.cwd(), 'prusa-lapse.config.json');
-const CAPTURES_DIR = process.env.PRUSALAPSE_CAPTURES_DIR || path.join(process.cwd(), 'public', 'captures');
+function getDefaultDataDir() {
+  if (process.platform === 'win32' && process.env.APPDATA) {
+    return path.join(process.env.APPDATA, 'PrusaLapse');
+  }
+  if (process.platform === 'darwin' && process.env.HOME) {
+    return path.join(process.env.HOME, 'Library', 'Application Support', 'PrusaLapse');
+  }
+  if (process.platform === 'linux' && (process.env.XDG_CONFIG_HOME || process.env.HOME)) {
+    return path.join(process.env.XDG_CONFIG_HOME || path.join(process.env.HOME, '.config'), 'PrusaLapse');
+  }
+  return null;
+}
+
+function isSystemOrReadOnlyDirectory(dirPath) {
+  if (!dirPath) return false;
+  const p = path.resolve(dirPath).toLowerCase();
+  if (process.platform === 'win32') {
+    const progFiles = (process.env.ProgramFiles || 'C:\\Program Files').toLowerCase();
+    const progFilesX86 = (process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)').toLowerCase();
+    return p.startsWith(progFiles) || p.startsWith(progFilesX86) || p.includes('program files');
+  }
+  return p.startsWith('/usr') || p.startsWith('/opt') || p.startsWith('/var');
+}
+
+export function getCapturesDir() {
+  if (process.env.PRUSALAPSE_CAPTURES_DIR) {
+    return process.env.PRUSALAPSE_CAPTURES_DIR;
+  }
+  if (isSystemOrReadOnlyDirectory(process.cwd())) {
+    const defaultData = getDefaultDataDir();
+    if (defaultData) {
+      return path.join(defaultData, 'captures');
+    }
+  }
+  return path.join(process.cwd(), 'public', 'captures');
+}
+
+export function getConfigFile() {
+  if (process.env.PRUSALAPSE_CONFIG_FILE) {
+    return process.env.PRUSALAPSE_CONFIG_FILE;
+  }
+  if (isSystemOrReadOnlyDirectory(process.cwd())) {
+    const defaultData = getDefaultDataDir();
+    if (defaultData) {
+      return path.join(defaultData, 'prusa-lapse.config.json');
+    }
+  }
+  return path.join(process.cwd(), 'prusa-lapse.config.json');
+}
+
+const CAPTURES_DIR = getCapturesDir();
 
 const DEFAULT_SLICER_CONFIG = {
   autoInjectOrcaSlicer: true,

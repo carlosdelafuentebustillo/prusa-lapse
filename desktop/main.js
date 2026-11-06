@@ -100,12 +100,41 @@ async function startServer() {
   const serverDir = path.dirname(serverScript);
   const ffmpegPath = findFfmpegPath();
 
+  const userDataDir = app.getPath('userData');
+  const userCapturesDir = path.join(userDataDir, 'captures');
+  const userConfigFile = path.join(userDataDir, 'prusa-lapse.config.json');
+
+  try {
+    if (!fs.existsSync(userCapturesDir)) {
+      fs.mkdirSync(userCapturesDir, { recursive: true });
+    }
+  } catch (e) {}
+
+  // Auto-seed userConfigFile if it doesn't exist yet
+  if (!fs.existsSync(userConfigFile)) {
+    const candidateConfigs = [
+      path.join(serverDir, 'prusa-lapse.config.json'),
+      path.join(__dirname, 'prusa-lapse.config.json'),
+      path.join(__dirname, '..', 'webapp', 'prusa-lapse.config.json')
+    ];
+    for (const cc of candidateConfigs) {
+      if (fs.existsSync(cc) && fs.statSync(cc).size > 10) {
+        try {
+          fs.copyFileSync(cc, userConfigFile);
+          break;
+        } catch (e) {}
+      }
+    }
+  }
+
   const env = Object.assign({}, process.env, {
     PORT: activePort.toString(),
     HOSTNAME: '127.0.0.1',
     NODE_ENV: 'production',
     ELECTRON_RUN_AS_NODE: '1',
-    FFMPEG_PATH: ffmpegPath
+    FFMPEG_PATH: ffmpegPath,
+    PRUSALAPSE_CONFIG_FILE: userConfigFile,
+    PRUSALAPSE_CAPTURES_DIR: userCapturesDir
   });
 
   serverProcess = fork(serverScript, [], {
