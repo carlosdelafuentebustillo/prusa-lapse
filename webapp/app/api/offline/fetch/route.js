@@ -20,6 +20,15 @@ export async function POST(request) {
     } catch (e) {
       // Ignore JSON parse errors if body is empty
     }
+    if (monitor.fetchStatus && monitor.fetchStatus.isFetching) {
+      return NextResponse.json({
+        success: true,
+        isFetching: true,
+        sessionId: monitor.fetchStatus.sessionId,
+        remoteSessionId: monitor.fetchStatus.remoteSessionId
+      });
+    }
+
     const result = await monitor.fetchOfflineSession(targetSessionIds, sessionTimestamp, jobName, jobId, remoteSessionId, remoteFrameCounts);
     if (!result.success) {
       return NextResponse.json({ success: false, error: result.error, sessionId: result.sessionId }, { status: 400 });

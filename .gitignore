@@ -9,6 +9,7 @@ build/
 webapp/public/captures/*
 !webapp/public/captures/.gitkeep
 webapp/prusa-lapse.config.json
+prusa-lapse.config.json
 
 # OS & Editor files
 .DS_Store

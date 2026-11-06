@@ -62,7 +62,21 @@ function getFFmpegPath() {
   const nestedPath = path.join(process.cwd(), 'node_modules', '@ffmpeg-installer', 'ffmpeg', 'node_modules', '@ffmpeg-installer', platformDir, binaryName);
   if (platformDir && existsSync(nestedPath)) return nestedPath;
 
-  // 5. Fallback to system PATH (e.g. Linux /usr/bin/ffmpeg or Docker container)
+  // 5. Windows installed locations
+  if (platform === 'win32') {
+    const winCandidates = [
+      'C:\\Program Files\\PrusaLapse\\resources\\app\\bin\\ffmpeg.exe',
+      'C:\\Program Files\\PrusaLapse\\resources\\bin\\ffmpeg.exe',
+      path.join(process.env.LOCALAPPDATA || '', 'Programs', 'PrusaLapse', 'resources', 'app', 'bin', 'ffmpeg.exe'),
+      path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'PrusaLapse', 'resources', 'app', 'bin', 'ffmpeg.exe'),
+      path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'PrusaLapse', 'resources', 'app', 'bin', 'ffmpeg.exe')
+    ];
+    for (const cand of winCandidates) {
+      if (cand && existsSync(cand)) return cand;
+    }
+  }
+
+  // 6. Fallback to system PATH (e.g. Linux /usr/bin/ffmpeg or Docker container)
   return 'ffmpeg';
 }
 
@@ -278,7 +292,38 @@ class MonitorService {
 
   async getConfig() {
     try {
-      const data = await fs.readFile(getConfigFile(), 'utf-8');
+      const cfgPath = getConfigFile();
+      let data;
+      try {
+        data = await fs.readFile(cfgPath, 'utf-8');
+      } catch (readErr) {
+        // Fallback: If configured path doesn't exist, search candidate locations
+        const candidates = [
+          path.join(process.cwd(), 'prusa-lapse.config.json'),
+          path.join(process.cwd(), '..', 'prusa-lapse.config.json'),
+          'C:\\Program Files\\PrusaLapse\\resources\\app\\app\\prusa-lapse.config.json',
+          'C:\\Program Files\\PrusaLapse\\resources\\app\\prusa-lapse.config.json'
+        ];
+        let foundCandidate = null;
+        for (const cand of candidates) {
+          if (cand !== cfgPath && existsSync(cand)) {
+            try {
+              data = await fs.readFile(cand, 'utf-8');
+              foundCandidate = cand;
+              break;
+            } catch {}
+          }
+        }
+        if (data) {
+          // Auto-seed the target configuration file so subsequent operations write to the desired path
+          try {
+            await fs.mkdir(path.dirname(cfgPath), { recursive: true });
+            await fs.writeFile(cfgPath, data, 'utf-8');
+          } catch {}
+        } else {
+          throw readErr;
+        }
+      }
       const parsed = JSON.parse(data) || {};
       return {
         ...parsed,
@@ -1114,8 +1159,22 @@ class MonitorService {
         await this.syncJobMetadata(sessionDir, jobId, jobName, timestamp);
       } catch {}
       this.remoteSessionsCache = this.remoteSessionsCache.filter(s => s.timestamp !== timestamp);
+      this.lastFetchResult = {
+        success: true,
+        sessionId,
+        totalFramesFetched,
+        completedAt: Date.now()
+      };
       this.log(`Session sync completed successfully (${totalFramesFetched} frames). Saved as ${sessionId}.`, 'success');
       return { success: true, sessionId };
+    } catch (fetchErr) {
+      this.lastFetchResult = {
+        success: false,
+        sessionId,
+        error: fetchErr.message,
+        completedAt: Date.now()
+      };
+      throw fetchErr;
     } finally {
       this.fetchStatus = null;
     }
@@ -1168,7 +1227,8 @@ class MonitorService {
       frameCount: this.frameCount,
       isCompiling: this.isCompiling,
       logs: this.logs,
-      fetchStatus: this.fetchStatus
+      fetchStatus: this.fetchStatus,
+      lastFetchResult: this.lastFetchResult || null
     };
   }
 
