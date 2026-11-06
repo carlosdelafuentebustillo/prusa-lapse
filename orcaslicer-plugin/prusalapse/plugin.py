@@ -1,13 +1,13 @@
 # /// script
 # name = "prusalapse"
-# version = "1.3.2"
+# version = "1.3.3"
 # description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
 # authors = [{name = "PrusaLapse"}]
 # requires-python = ">=3.10"
 # dependencies = []
 # [tool.orcaslicer.plugin]
 # name = "prusalapse"
-# version = "1.3.2"
+# version = "1.3.3"
 # author = "PrusaLapse"
 # description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
 # ///
@@ -140,8 +140,26 @@ def find_server_components() -> tuple[str | None, str | None, dict[str, str]]:
         pl_dir = os.path.join(appdata, "PrusaLapse")
         try:
             os.makedirs(pl_dir, exist_ok=True)
-            extra_env["PRUSALAPSE_CONFIG_FILE"] = os.path.join(pl_dir, "prusa-lapse.config.json")
+            target_cfg = os.path.join(pl_dir, "prusa-lapse.config.json")
+            extra_env["PRUSALAPSE_CONFIG_FILE"] = target_cfg
             extra_env["PRUSALAPSE_CAPTURES_DIR"] = os.path.join(pl_dir, "captures")
+
+            # Auto-seed configuration if target_cfg does not exist or is empty
+            if not os.path.exists(target_cfg) or os.path.getsize(target_cfg) < 10:
+                cfg_candidates = [
+                    os.path.abspath(os.path.join(os.path.dirname(selected_script), "..", "..", "prusa-lapse.config.json")),
+                    os.path.abspath(os.path.join(os.path.dirname(selected_script), "prusa-lapse.config.json")),
+                    r"C:\Users\cafub\Documents\Antigravity\dual-dalmatian\webapp\prusa-lapse.config.json",
+                    r"C:\Program Files\PrusaLapse\resources\app\app\prusa-lapse.config.json",
+                    os.path.join(local_app_data, "Programs", "PrusaLapse", "resources", "app", "app", "prusa-lapse.config.json"),
+                ]
+                for cc in cfg_candidates:
+                    if cc and os.path.exists(cc) and os.path.getsize(cc) > 10:
+                        try:
+                            shutil.copy2(cc, target_cfg)
+                            break
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -899,7 +917,7 @@ _BasePluginClass = getattr(orca, "base", object)
 class PrusaLapsePlugin(_BasePluginClass):
     id = "prusalapse"
     name = "PrusaLapse"
-    version = "1.3.2"
+    version = "1.3.3"
     description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
     author = "PrusaLapse"
     page = PrusaLapsePage

@@ -309,6 +309,8 @@ export default function Home() {
   const [fetchingSessionId, setFetchingSessionId] = useState(null);
   const [fetchStatus, setFetchStatus] = useState(null);
   const isFetchRequestInFlightRef = useRef(false);
+  const prevFetchingRef = useRef(false);
+  const lastHandledFetchCompletionRef = useRef(0);
 
   const now = new Date();
   const [currentMonthDate, setCurrentMonthDate] = useState({ month: now.getMonth() + 1, year: now.getFullYear() });
@@ -677,11 +679,24 @@ export default function Home() {
           }
           if (data.fetchStatus !== undefined) {
             if (data.fetchStatus?.isFetching) {
+              prevFetchingRef.current = true;
               setFetchStatus(data.fetchStatus);
               if (data.fetchStatus.remoteSessionId || data.fetchStatus.sessionId) {
                 setFetchingSessionId(data.fetchStatus.remoteSessionId || data.fetchStatus.sessionId);
               }
             } else if (!isFetchRequestInFlightRef.current) {
+              if (prevFetchingRef.current) {
+                prevFetchingRef.current = false;
+                if (data.lastFetchResult && data.lastFetchResult.completedAt > lastHandledFetchCompletionRef.current) {
+                  lastHandledFetchCompletionRef.current = data.lastFetchResult.completedAt;
+                  if (data.lastFetchResult.success) {
+                    addToast('Session synced from SD card!', 'success');
+                  } else if (data.lastFetchResult.error) {
+                    addToast(`Sync failed: ${data.lastFetchResult.error}`, 'error');
+                  }
+                  fetchSessions(true);
+                }
+              }
               setFetchStatus(null);
               if (fetchingSessionId) {
                 setFetchingSessionId(null);
@@ -708,11 +723,24 @@ export default function Home() {
         .then(data => {
           if (data.fetchStatus !== undefined) {
             if (data.fetchStatus?.isFetching) {
+              prevFetchingRef.current = true;
               setFetchStatus(data.fetchStatus);
               if (data.fetchStatus.remoteSessionId || data.fetchStatus.sessionId) {
                 setFetchingSessionId(data.fetchStatus.remoteSessionId || data.fetchStatus.sessionId);
               }
             } else if (!isFetchRequestInFlightRef.current) {
+              if (prevFetchingRef.current) {
+                prevFetchingRef.current = false;
+                if (data.lastFetchResult && data.lastFetchResult.completedAt > lastHandledFetchCompletionRef.current) {
+                  lastHandledFetchCompletionRef.current = data.lastFetchResult.completedAt;
+                  if (data.lastFetchResult.success) {
+                    addToast('Session synced from SD card!', 'success');
+                  } else if (data.lastFetchResult.error) {
+                    addToast(`Sync failed: ${data.lastFetchResult.error}`, 'error');
+                  }
+                  fetchSessions(true);
+                }
+              }
               setFetchStatus(null);
               setFetchingSessionId(null);
             }
@@ -1021,6 +1049,7 @@ export default function Home() {
     }, 600);
 
     try {
+      prevFetchingRef.current = true;
       const res = await fetch('/api/offline/fetch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1035,22 +1064,31 @@ export default function Home() {
       });
       clearTimeout(earlyRefreshTimer);
       if (res.ok) {
+        const json = await res.json().catch(() => ({}));
         await fetchSessions(false);
-        addToast('Session synced from SD card!', 'success');
-        fetchSessions(true);
+        if (json.success && !json.isFetching) {
+          prevFetchingRef.current = false;
+          addToast('Session synced from SD card!', 'success');
+          fetchSessions(true);
+          setFetchingSessionId(null);
+          setFetchStatus(null);
+        }
       } else {
-        const err = await res.json();
+        const err = await res.json().catch(() => ({}));
+        prevFetchingRef.current = false;
         await fetchSessions(false);
-        addToast(`Sync failed: ${err.error}`, 'error');
+        addToast(`Sync failed: ${err.error || 'Server error'}`, 'error');
         fetchSessions(true);
+        setFetchingSessionId(null);
+        setFetchStatus(null);
       }
     } catch (e) {
       clearTimeout(earlyRefreshTimer);
-      addToast(`Sync failed: ${e.message}`, 'error');
+      // If the client connection closed or timed out while downloading frames,
+      // background polling will continue updating progress and notify completion.
+      console.warn('Sync connection closed or timed out:', e.message);
     } finally {
       isFetchRequestInFlightRef.current = false;
-      setFetchingSessionId(null);
-      setFetchStatus(null);
     }
   };
 
