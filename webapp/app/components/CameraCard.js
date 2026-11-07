@@ -6,57 +6,20 @@ function SnapshotImage({ ip, idx }) {
   const [snapshotUrl, setSnapshotUrl] = useState(`http://${ip}/snapshot.jpg?t=${Date.now()}`);
   const [lastGoodUrl, setLastGoodUrl] = useState(null);
   const [consecutiveErrors, setConsecutiveErrors] = useState(0);
-  const [isRefreshing, setIsRefreshing] = useState(false);
 
   useEffect(() => {
     const initialUrl = `http://${ip}/snapshot.jpg?t=${Date.now()}`;
     setSnapshotUrl(initialUrl);
-
-    // Preload image updates in background every 10s so busy camera locks (e.g. during layer capture)
-    // never wipe out the current live view or get permanently stuck
-    const interval = setInterval(() => {
-      const nextUrl = `http://${ip}/snapshot.jpg?t=${Date.now()}`;
-      const preload = new Image();
-      preload.onload = () => {
-        setSnapshotUrl(nextUrl);
-        setLastGoodUrl(nextUrl);
-        setConsecutiveErrors(0);
-      };
-      preload.onerror = () => {
-        setConsecutiveErrors(prev => prev + 1);
-      };
-      preload.src = nextUrl;
-    }, 10000);
-
-    return () => clearInterval(interval);
   }, [ip]);
-
-  const handleRefresh = () => {
-    setIsRefreshing(true);
-    const freshUrl = `http://${ip}/snapshot.jpg?t=${Date.now()}&fresh=1`;
-    const preload = new Image();
-    preload.onload = () => {
-      setSnapshotUrl(freshUrl);
-      setLastGoodUrl(freshUrl);
-      setConsecutiveErrors(0);
-      setIsRefreshing(false);
-    };
-    preload.onerror = () => {
-      setConsecutiveErrors(prev => prev + 1);
-      setIsRefreshing(false);
-    };
-    preload.src = freshUrl;
-  };
 
   const isHardError = consecutiveErrors >= 4 && !lastGoodUrl;
 
   if (isHardError) {
     return (
       <div
-        onClick={handleRefresh}
-        style={{ padding: '32px 20px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem', cursor: 'pointer' }}
+        style={{ padding: '32px 20px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}
       >
-        Snapshot unavailable · Click to retry
+        Snapshot unavailable
       </div>
     );
   }
@@ -68,18 +31,14 @@ function SnapshotImage({ ip, idx }) {
       <img
         src={activeDisplayUrl}
         alt={`Snapshot Camera ${idx + 1}`}
-        style={{ width: '100%', height: 'auto', display: 'block', cursor: 'pointer' }}
-        onClick={handleRefresh}
+        style={{ width: '100%', height: 'auto', display: 'block' }}
         onLoad={() => {
           setLastGoodUrl(activeDisplayUrl);
           setConsecutiveErrors(0);
-          setIsRefreshing(false);
         }}
         onError={() => {
           setConsecutiveErrors(prev => prev + 1);
-          setIsRefreshing(false);
         }}
-        title="Click to capture a fresh snapshot"
       />
       {consecutiveErrors >= 3 && lastGoodUrl && (
         <div style={{
@@ -97,10 +56,6 @@ function SnapshotImage({ ip, idx }) {
           Reconnecting…
         </div>
       )}
-      <div
-        className={isRefreshing ? 'refresh-glow' : ''}
-        style={{ position: 'absolute', inset: 0, pointerEvents: 'none', borderRadius: '8px' }}
-      />
     </div>
   );
 }
@@ -113,11 +68,26 @@ export default function CameraCard({
   getCameraVal,
   fetchCameraSettings,
   config,
-  addToast
+  addToast,
+  isStreaming = false,
+  onToggleStream
 }) {
   const [showSettings, setShowSettings] = useState(false);
   const [cameraNameInput, setCameraNameInput] = useState(getCameraVal(cleanIp, 'camera_name', `Camera ${idx + 1}`));
   const [connectTokenInput, setConnectTokenInput] = useState('');
+
+  useEffect(() => {
+    if (!isStreaming) return;
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        if (onToggleStream) onToggleStream();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [isStreaming, onToggleStream]);
 
   const hasSettings = cameraSettings[cleanIp] !== undefined;
   const cameraName = getCameraVal(cleanIp, 'camera_name', `Camera ${idx + 1}`);
@@ -179,6 +149,15 @@ export default function CameraCard({
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
           <button
             type="button"
+            className={`btn btn-small ${isStreaming ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={onToggleStream}
+            style={{ width: 'auto', padding: '3px 8px', fontSize: '0.72rem' }}
+            title={isStreaming ? 'Switch to Snapshot Mode' : 'Switch to Live Video Stream'}
+          >
+            {isStreaming ? '📹 Live Stream' : '📷 Snapshot'}
+          </button>
+          <button
+            type="button"
             className={`btn btn-small ${led === 1 ? 'btn-primary' : led === 2 ? 'btn-secondary' : 'btn-ghost'}`}
             style={{ width: 'auto', padding: '4px 10px', fontSize: '0.72rem', gap: '4px' }}
             onClick={() => updateCameraSetting(cleanIp, 'led', led === 2 ? 1 : led === 1 ? 0 : 2)}
@@ -206,9 +185,61 @@ export default function CameraCard({
         </div>
       </div>
 
-      {/* Live Preview */}
+      {/* Amber Warning Banner when Live Streaming */}
+      {isStreaming && (
+        <div style={{
+          margin: '6px 0',
+          padding: '6px 10px',
+          background: 'rgba(255, 170, 0, 0.12)',
+          border: '1px solid rgba(255, 170, 0, 0.35)',
+          borderRadius: '6px',
+          color: '#ffaa00',
+          fontSize: '0.73rem',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px'
+        }}>
+          <span>⚠️</span>
+          <span>Live streaming active: timelapse capture resolution on this camera is temporarily reduced to SVGA.</span>
+        </div>
+      )}
+
+      {/* Live Preview / Stream Player */}
       <div className="video-player-container" style={{ background: '#000', borderRadius: '8px', overflow: 'hidden', minHeight: '150px', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', margin: 0 }}>
-        <SnapshotImage ip={cleanIp} idx={idx} />
+        {isStreaming ? (
+          <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+            <img
+              src={`http://${cleanIp}/stream`}
+              alt={`Live Stream Camera ${idx + 1}`}
+              style={{ width: '100%', height: 'auto', display: 'block' }}
+              onError={() => {
+                if (addToast) addToast(`Live stream disconnected for Camera ${idx + 1}`, 'error');
+                if (onToggleStream) onToggleStream();
+              }}
+            />
+            <div style={{
+              position: 'absolute',
+              top: '8px',
+              left: '8px',
+              background: 'rgba(0, 0, 0, 0.7)',
+              backdropFilter: 'blur(4px)',
+              color: '#22c55e',
+              fontSize: '0.7rem',
+              fontWeight: 600,
+              padding: '2px 8px',
+              borderRadius: '4px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '4px',
+              pointerEvents: 'none'
+            }}>
+              <span style={{ color: '#22c55e', animation: 'pulse 1.2s infinite' }}>●</span>
+              <span>LIVE (~4 FPS)</span>
+            </div>
+          </div>
+        ) : (
+          <SnapshotImage ip={cleanIp} idx={idx} />
+        )}
       </div>
 
       {/* Collapsible Camera Settings Drawer */}

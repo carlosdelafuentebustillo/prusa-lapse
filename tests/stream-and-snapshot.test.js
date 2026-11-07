@@ -63,7 +63,54 @@ function runTests() {
   assert.strictEqual(activeCamera === cameraC, false, 'No camera should be streaming (C)');
   console.log('✓ Test 3 Passed: Toggling Camera B off sets active camera to null');
 
-  console.log('\nALL STREAM COORDINATOR TESTS PASSED!');
+  console.log('\nTesting Webapp Camera Card UI & Version...\n');
+
+  const pkgPath = path.join(__dirname, '../webapp/package.json');
+  assert.ok(fs.existsSync(pkgPath), 'webapp/package.json must exist');
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+  assert.strictEqual(pkg.version, '1.3.6', 'webapp version must be bumped to 1.3.6');
+  console.log('✓ Test 4 Passed: Package version is 1.3.6');
+
+  const cardPath = path.join(__dirname, '../webapp/app/components/CameraCard.js');
+  assert.ok(fs.existsSync(cardPath), 'webapp/app/components/CameraCard.js must exist');
+  const cardSrc = fs.readFileSync(cardPath, 'utf8');
+
+  // Verify SnapshotImage is inert
+  assert.ok(!cardSrc.includes('10000'), 'SnapshotImage must not contain 10000ms polling interval');
+  assert.ok(!cardSrc.includes('handleRefresh'), 'SnapshotImage must not have handleRefresh handler');
+  assert.ok(!cardSrc.includes('isRefreshing'), 'SnapshotImage must not track isRefreshing state');
+  assert.ok(!cardSrc.includes('fresh=1'), 'SnapshotImage must not request fresh=1 snapshot');
+  assert.ok(!cardSrc.includes('Click to capture a fresh snapshot'), 'SnapshotImage must not have click-to-refresh tooltip');
+  console.log('✓ Test 5 Passed: SnapshotImage is completely inert (no polling, no click-to-refresh)');
+
+  // Verify stream toggle and mode controls in CameraCard
+  assert.ok(cardSrc.includes('isStreaming'), 'CameraCard must handle isStreaming prop');
+  assert.ok(cardSrc.includes('onToggleStream'), 'CameraCard must handle onToggleStream prop');
+  assert.ok(cardSrc.includes('Live Stream') && cardSrc.includes('Snapshot'), 'CameraCard must include mode toggle buttons');
+  console.log('✓ Test 6 Passed: Mode toggle button controls present');
+
+  // Verify amber warning banner copy
+  assert.ok(
+    cardSrc.includes('Live streaming active: timelapse capture resolution on this camera is temporarily reduced to SVGA'),
+    'CameraCard must display amber warning copy when isStreaming is active'
+  );
+  console.log('✓ Test 7 Passed: Amber warning banner copy present');
+
+  // Verify native stream img tag and live badge
+  assert.ok(
+    cardSrc.includes('/stream') && cardSrc.includes('LIVE (~4 FPS)'),
+    'CameraCard must render /stream img element and LIVE (~4 FPS) badge'
+  );
+  console.log('✓ Test 8 Passed: Live stream img tag and LIVE (~4 FPS) badge present');
+
+  // Verify visibilitychange listener for socket cleanup
+  assert.ok(
+    cardSrc.includes('visibilitychange'),
+    'CameraCard must register visibilitychange listener to teardown stream on hidden tab'
+  );
+  console.log('✓ Test 9 Passed: Tab visibilitychange listener present for socket cleanup');
+
+  console.log('\nALL STREAM & CAMERA CARD TESTS PASSED!');
 }
 
 runTests();
