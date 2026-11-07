@@ -325,6 +325,11 @@ export default function Home() {
   const [otaProgress, setOtaProgress] = useState(0);
   const [latestFirmwareInfo, setLatestFirmwareInfo] = useState(null);
   const [useCustomOtaFile, setUseCustomOtaFile] = useState(false);
+  const [activeStreamingCameraIp, setActiveStreamingCameraIp] = useState(null);
+
+  const handleToggleStream = useCallback((cameraIp) => {
+    setActiveStreamingCameraIp(prev => (prev === cameraIp ? null : cameraIp));
+  }, []);
 
   const [toasts, setToasts] = useState([]);
   const [confirmModal, setConfirmModal] = useState(null);
@@ -1673,6 +1678,8 @@ export default function Home() {
                 fetchCameraSettings={fetchCameraSettings}
                 config={config}
                 addToast={addToast}
+                isStreaming={activeStreamingCameraIp === ip.trim()}
+                onToggleStream={() => handleToggleStream(ip.trim())}
               />
             ))}
             {(!config.cameraIps || config.cameraIps.trim() === '') && (
