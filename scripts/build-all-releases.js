@@ -83,9 +83,9 @@ fwZip.addLocalFile(fwBin, '', 'firmware.bin');
 if (fs.existsSync(blBin)) fwZip.addLocalFile(blBin, '', 'bootloader.bin');
 if (fs.existsSync(ptBin)) fwZip.addLocalFile(ptBin, '', 'partitions.bin');
 
-const fwBat = path.join(ROOT_DIR, 'deploy', 'firmware', 'flash-firmware-windows.bat');
-const fwSh = path.join(ROOT_DIR, 'deploy', 'firmware', 'flash-firmware-linux.sh');
-const fwReadme = path.join(ROOT_DIR, 'deploy', 'firmware', 'README.md');
+const fwBat = path.join(ROOT_DIR, 'firmware', 'flash-firmware-windows.bat');
+const fwSh = path.join(ROOT_DIR, 'firmware', 'flash-firmware-linux.sh');
+const fwReadme = path.join(ROOT_DIR, 'firmware', 'README.md');
 
 if (fs.existsSync(fwBat)) fwZip.addLocalFile(fwBat, '', 'flash-firmware-windows.bat');
 if (fs.existsSync(fwSh)) fwZip.addLocalFile(fwSh, '', 'flash-firmware-linux.sh');
@@ -134,8 +134,32 @@ fs.cpSync(standaloneDir, serverStageDir, { recursive: true });
 // Add systemd service and docker files to server bundle
 const deployDir = path.join(serverStageDir, 'deploy');
 fs.mkdirSync(deployDir, { recursive: true });
-fs.copyFileSync(path.join(ROOT_DIR, 'deploy', 'systemd', 'prusalapse.service'), path.join(deployDir, 'prusalapse.service'));
-fs.copyFileSync(path.join(ROOT_DIR, 'deploy', 'DOCKER_DEPLOYMENT.md'), path.join(serverStageDir, 'DOCKER_DEPLOYMENT.md'));
+const systemdUnit = [
+  '[Unit]',
+  'Description=PrusaLapse Timelapse & Multi-Camera Monitoring Server',
+  'Documentation=https://github.com/carlosdelafuentebustillo/prusa-lapse',
+  'After=network.target',
+  '',
+  '[Service]',
+  'Type=simple',
+  'User=pi',
+  'WorkingDirectory=/opt/prusalapse',
+  'Environment=NODE_ENV=production',
+  'Environment=PORT=3000',
+  'Environment=HOSTNAME=0.0.0.0',
+  'ExecStart=/usr/bin/node /opt/prusalapse/server.js',
+  'Restart=always',
+  'RestartSec=5',
+  'StandardOutput=journal',
+  'StandardError=journal',
+  'SyslogIdentifier=prusalapse',
+  '',
+  '[Install]',
+  'WantedBy=multi-user.target',
+  ''
+].join('\n');
+fs.writeFileSync(path.join(deployDir, 'prusalapse.service'), systemdUnit, 'utf8');
+fs.copyFileSync(path.join(ROOT_DIR, 'README.md'), path.join(serverStageDir, 'README.md'));
 fs.copyFileSync(path.join(ROOT_DIR, 'Dockerfile'), path.join(serverStageDir, 'Dockerfile'));
 fs.copyFileSync(path.join(ROOT_DIR, 'docker-compose.yml'), path.join(serverStageDir, 'docker-compose.yml'));
 
@@ -201,8 +225,7 @@ if (fs.existsSync(legacyLinuxTar)) fs.rmSync(legacyLinuxTar);
 console.log('\n--- Step 5: Copying Docker & Compose Release Files ---');
 fs.copyFileSync(path.join(ROOT_DIR, 'Dockerfile'), path.join(RELEASE_DIR, 'Dockerfile'));
 fs.copyFileSync(path.join(ROOT_DIR, 'docker-compose.yml'), path.join(RELEASE_DIR, 'docker-compose.yml'));
-fs.copyFileSync(path.join(ROOT_DIR, 'deploy', 'DOCKER_DEPLOYMENT.md'), path.join(RELEASE_DIR, 'DOCKER_DEPLOYMENT.md'));
-console.log('✓ Copied Dockerfile, docker-compose.yml, and DOCKER_DEPLOYMENT.md');
+console.log('✓ Copied Dockerfile and docker-compose.yml');
 
 // ============================================================================
 // STEP 6: ORCASLICER NATIVE PLUGIN PACKAGE (ZIP)
@@ -328,24 +351,17 @@ const releaseNotes = `# PrusaLapse v${VERSION} Release
 fs.writeFileSync(path.join(RELEASE_DIR, 'RELEASE_NOTES.md'), releaseNotes);
 console.log('✓ Generated: RELEASE_NOTES.md');
 
-// Clean up temporary staging directories and intermediate unpacked output files
-const distRoot = path.join(ROOT_DIR, 'dist');
-if (fs.existsSync(distRoot)) {
-  fs.rmSync(distRoot, { recursive: true, force: true });
-}
-['win-unpacked', 'linux-unpacked', '.icon-ico', 'builder-debug.yml'].forEach((item) => {
-  const target = path.join(DESKTOP_DIST_DIR, item);
-  if (fs.existsSync(target)) {
-    fs.rmSync(target, { recursive: true, force: true });
+// Clean up temporary staging directories and intermediate desktop output folders
+[
+  path.join(ROOT_DIR, 'dist'),
+  path.join(DESKTOP_DIR, 'app'),
+  path.join(DESKTOP_DIR, 'bin'),
+  DESKTOP_DIST_DIR,
+].forEach((dir) => {
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
-if (fs.existsSync(DESKTOP_DIST_DIR)) {
-  for (const entry of fs.readdirSync(DESKTOP_DIST_DIR)) {
-    if (entry.endsWith('.blockmap')) {
-      fs.rmSync(path.join(DESKTOP_DIST_DIR, entry), { force: true });
-    }
-  }
-}
 
 console.log('\n================================================================');
 console.log(`[SUCCESS] All v${VERSION} release artifacts built and packaged in:`);

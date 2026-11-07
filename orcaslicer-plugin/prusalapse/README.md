@@ -49,10 +49,9 @@ Restart OrcaSlicer after copying the files.
 
 ```text
 prusalapse/
-├── __init__.py        # Package exports
-├── plugin.py          # OrcaSlicer capability declarations & pipeline hook
-├── injector.py        # Core G-code stream injector and bed boundary clamp
+├── plugin.py          # Self-contained OrcaSlicer plugin & G-code injection engine
 ├── config.json        # Local plugin configuration
+├── install_state.json # OrcaSlicer local plugin registration state
 └── README.md          # Documentation
 ```
 

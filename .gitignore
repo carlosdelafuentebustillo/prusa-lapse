@@ -4,6 +4,7 @@ node_modules/
 out/
 build/
 .pio/
+webapp/public/firmware.bin
 
 # Local captures & user credentials
 webapp/public/captures/*

@@ -1,4 +1,4 @@
-const { monitor } = require('../webapp/lib/monitor');
+const { monitor } = require('../lib/monitor');
 const assert = require('assert');
 
 async function runTests() {

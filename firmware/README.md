@@ -1,34 +1,63 @@
-# Prusa-lapse Firmware
+# Prusa-lapse Firmware & Hardware Guide (ESP32-CAM)
 
-This directory contains the custom **ESP32-CAM** firmware for the Prusa-lapse project. 
+This directory contains the custom **ESP32-CAM** firmware, 1-click USB flashing scripts, and hardware wiring instructions for the Prusa-lapse multi-camera system.
 
-The firmware provides:
-* **Prusa Connect Cloud Integration**: Native HTTPS uploads of snapshots directly to `webcam.connect.prusa3d.com` without needing the webapp running.
-* **Lightweight Local Snapshots**: A fast, cache-busting `/snapshot.jpg` endpoint that the Prusa-lapse Webapp uses for multi-camera cinematic timelapses.
-* **Zero-Latency Hardware Triggers**: The firmware can instantly spawn a capture task via a GPIO 12 hardware interrupt or by parsing `M118 action:capture_photo` strings over the Serial UART, bypassing network polling completely.
-* **Wi-Fi Manager**: A captive portal to easily enter your home Wi-Fi credentials without hardcoding them.
-* **SD Card Fallback**: If configured, the camera can save high-resolution `.jpg` images directly to the SD card during an offline timelapse.
+---
 
-## 1. How to Compile and Flash
+## 1. Hardware Requirements & Wiring
 
-This project uses **PlatformIO** to manage dependencies and compilation.
+### Bill of Materials (BOM)
+* **ESP32-CAM Modules** (with OV2640 camera sensors).
+* **MicroSD Cards** (8GB or 16GB, Class 10 recommended, formatted as FAT32).
+* **5V Power Supply** (At least 2A output; ESP32-CAMs draw up to 500mA each during capture/flash).
+* **USB-to-TTL Serial Adapter** (FTDI programmer) — only required for initial USB flashing.
 
-1. Install [Visual Studio Code](https://code.visualstudio.com/) and the [PlatformIO IDE extension](https://platformio.org/install/ide?install=vscode).
-2. Open the `firmware` folder in VS Code.
-3. Connect your ESP32-CAM to your computer using an FTDI adapter. (Remember to short GPIO 0 to GND while powering on to enter flashing mode).
-4. Click the **PlatformIO: Upload** button (the right arrow `→` in the bottom status bar).
+### Power Delivery
+1. **Always power via 5V and GND pins.** Do not power via the 3.3V pin, which causes brownout resets during Wi-Fi/SD peaks.
+2. **Optional Capacitor:** Add a 100µF–470µF electrolytic capacitor across 5V and GND near the ESP32-CAM if using long USB/jumper runs.
 
-## 2. Setting up the Camera
+### Trigger Modes
+Prusa-lapse supports three ways to trigger layer captures:
+1. **Wireless PrusaLink Polling (`M220 S99`)**: Default mode, zero extra wiring required. The camera polls PrusaLink over Wi-Fi and triggers when speed changes to `99%` or on confirmed Smart Z layer changes.
+2. **Hackerboard GPIO Trigger (`M264 P0 S1`)**: Connect Prusa Hackerboard pin `P0` to ESP32-CAM **GPIO 12** and share Common Ground (`GND`). Note: GPIO 12 is a strapping pin and must not be pulled high during ESP32 boot.
+3. **USB Serial UART (`M118 action:capture_photo`)**: Connect Printer **TX** to ESP32-CAM **RX (GPIO 3)** and share Common Ground (`GND`).
 
-1. **Power it on:** Provide 5V to your ESP32-CAM. If this is the first boot, it will fail to connect to Wi-Fi and fall back to AP mode.
-2. **Connect to the AP:** The camera will broadcast a Wi-Fi network named `PrusaLapse-Camera`. Connect to it (Password: `12345678`).
-3. **Configure Wi-Fi:** Open your browser and navigate to `http://192.168.4.1`. Enter your home Wi-Fi network details and click "Save & Connect".
-4. **Find its new IP:** Check your router to find the camera's new IP address on your home network.
+---
 
-## 3. Integrating with Prusa-lapse and Prusa Connect
+## 2. Flashing the Firmware
 
-Once the camera is online and connected to your network:
-1. Open the **Prusa-lapse Webapp Dashboard**.
-2. Enter the camera's IP address in the configuration panel.
-3. The webapp will pull a live preview using `/snapshot.jpg`.
-4. **Prusa Connect (Optional)**: In the webapp monitor dashboard, you can paste in a Prusa Connect Camera Token. The firmware will save this token to its non-volatile memory and automatically begin uploading a snapshot to Prusa Connect every 10 seconds. You do NOT need the webapp running for this cloud integration to work!
+### Method A: Web Over-The-Air (OTA) Update (Existing Cameras)
+If your camera is already connected to your Wi-Fi network:
+1. Open the PrusaLapse dashboard (`http://localhost:3000`).
+2. Locate the camera card and click **Update Firmware**.
+3. Alternatively, upload via `curl`:
+   ```bash
+   curl -F "update=@firmware.bin" http://<CAMERA_IP>/update
+   ```
+
+### Method B: Initial USB Flashing (Release Package)
+1. Wire your FTDI programmer to the ESP32-CAM:
+   | FTDI Programmer | ESP32-CAM |
+   | :--- | :--- |
+   | 5V (VCC) | 5V |
+   | GND | GND |
+   | TXD | U0R (RX) |
+   | RXD | U0T (TX) |
+   | **GND** | **IO0** *(Shorted to GND during flash)* |
+2. Run the flasher script from the release package (or this directory after compiling):
+   * **Windows**: Double-click `flash-firmware-windows.bat`.
+   * **Linux / macOS**: Run `chmod +x flash-firmware-linux.sh && ./flash-firmware-linux.sh`.
+
+### Method C: Compile from Source (PlatformIO)
+```bash
+pio run -d firmware
+pio run -d firmware -t upload
+```
+
+---
+
+## 3. First-Time Wi-Fi Setup
+
+1. Disconnect the jumper wire between **IO0** and **GND** and press the **RST** button on the ESP32-CAM.
+2. Connect your phone or PC to the `PrusaLapse-Setup` (or `PrusaLapse-Camera`) Wi-Fi AP.
+3. Browse to `http://192.168.4.1`, enter your home Wi-Fi credentials, Prusa printer IP, and PrusaLink API Key, and click **Save**.

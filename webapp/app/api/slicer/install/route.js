@@ -37,19 +37,12 @@ export async function POST(request) {
       }, { status: 404 });
     }
 
-    const isOrcaPluginsDir = targetDir.includes('orca_plugins');
-
     fs.mkdirSync(targetDir, { recursive: true });
     fs.cpSync(src, dest, {
       recursive: true,
       force: true,
       filter: (srcPath) => {
         if (srcPath.includes('__pycache__') || srcPath.endsWith('.pyc')) return false;
-        // In orca_plugins, OrcaSlicer 2.5 enforces exactly one .py entry file per plugin directory
-        if (isOrcaPluginsDir) {
-          const base = path.basename(srcPath);
-          if (base === 'injector.py' || base === '__init__.py') return false;
-        }
         return true;
       }
     });

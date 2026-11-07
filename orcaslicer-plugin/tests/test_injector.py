@@ -5,7 +5,7 @@ import unittest
 # Ensure orcaslicer-plugin root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from prusalapse.injector import (
+from prusalapse.plugin import (
     is_binary_bgcode,
     parse_bed_boundaries,
     calculate_park_target,

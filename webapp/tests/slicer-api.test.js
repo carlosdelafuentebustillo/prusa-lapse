@@ -37,7 +37,7 @@ test('getPluginSourceDir locates orcaslicer-plugin/prusalapse', async () => {
   assert.ok(sourceDir, 'Source directory should be found');
   assert.ok(fs.existsSync(sourceDir));
   assert.ok(fs.existsSync(path.join(sourceDir, 'plugin.py')));
-  assert.ok(fs.existsSync(path.join(sourceDir, 'injector.py')));
+  assert.ok(fs.existsSync(path.join(sourceDir, 'config.json')));
 });
 
 test('GET /api/slicer/status returns expected status structure', async () => {
@@ -102,7 +102,6 @@ test('POST /api/slicer/install installs plugin to target directory', async () =>
 
     // Verify files were actually copied
     assert.ok(fs.existsSync(path.join(tempDir, 'prusalapse', 'plugin.py')));
-    assert.ok(fs.existsSync(path.join(tempDir, 'prusalapse', 'injector.py')));
     assert.ok(fs.existsSync(path.join(tempDir, 'prusalapse', 'config.json')));
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });

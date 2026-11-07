@@ -12,7 +12,7 @@ function runTests() {
   // =========================================================================
   console.log('--- SUITE 1: Single Active Stream Coordinator State Transitions ---');
 
-  const pagePath = path.join(__dirname, '../webapp/app/page.js');
+  const pagePath = path.join(__dirname, '../app/page.js');
   assert.ok(fs.existsSync(pagePath), 'webapp/app/page.js must exist');
   const pageSrc = fs.readFileSync(pagePath, 'utf8');
 
@@ -88,7 +88,7 @@ function runTests() {
   // =========================================================================
   console.log('--- SUITE 2: Inert Snapshot Mode & Direct Buffer Sync ---');
 
-  const cardPath = path.join(__dirname, '../webapp/app/components/CameraCard.js');
+  const cardPath = path.join(__dirname, '../app/components/CameraCard.js');
   assert.ok(fs.existsSync(cardPath), 'webapp/app/components/CameraCard.js must exist');
   const cardSrc = fs.readFileSync(cardPath, 'utf8');
 
@@ -108,7 +108,7 @@ function runTests() {
   console.log('  ✓ Step 2.2: SnapshotImage renders latest frame with error resilience');
 
   // 3. Firmware snapshot handler & Prusa Connect buffer sync
-  const mainCppPath = path.join(__dirname, '../firmware/src/main.cpp');
+  const mainCppPath = path.join(__dirname, '../../firmware/src/main.cpp');
   assert.ok(fs.existsSync(mainCppPath), 'firmware/src/main.cpp must exist');
   const mainCppSrc = fs.readFileSync(mainCppPath, 'utf8');
 
@@ -233,7 +233,7 @@ function runTests() {
   console.log('--- SUITE 5: Repository Version Consistency & Cross-Component Contracts ---');
 
   // 1. Webapp package.json version check (1.3.7)
-  const pkgPath = path.join(__dirname, '../webapp/package.json');
+  const pkgPath = path.join(__dirname, '../package.json');
   assert.ok(fs.existsSync(pkgPath), 'webapp/package.json must exist');
   const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
   assert.strictEqual(
