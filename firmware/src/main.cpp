@@ -635,6 +635,24 @@ void captureTask(void *pvParameters) {
         Serial.printf("HQ Capture: %d bytes (%s, avg=%u)\n", fb->len, stream_active ? "SVGA" : "UXGA", (unsigned int)rollingAvgLen);
       }
       
+      // Synchronize parked frame into snapshot_buf so /snapshot.jpg and Prusa Connect have immediate zero-blur photo
+      if (snapshot_mutex && xSemaphoreTake(snapshot_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        if (!snapshot_buf || snapshot_buf_size < fb->len) {
+          if (snapshot_buf) {
+            free(snapshot_buf);
+            snapshot_buf = NULL;
+            snapshot_buf_size = 0;
+          }
+          snapshot_buf = (uint8_t *)(psramFound() ? ps_malloc(fb->len) : malloc(fb->len));
+          if (snapshot_buf) snapshot_buf_size = fb->len;
+        }
+        if (snapshot_buf) {
+          memcpy(snapshot_buf, fb->buf, fb->len);
+          snapshot_len = fb->len;
+        }
+        xSemaphoreGive(snapshot_mutex);
+      }
+      
       // Wake up the background SD writer task
       if (sd_write_semaphore != NULL) {
         xSemaphoreGive(sd_write_semaphore);
@@ -739,12 +757,14 @@ void previewAndUploadTask(void *pvParameters) {
     uint32_t currentInterval = (currentPrinterState == "PRINTING") ? 30000 : 10000;
     vTaskDelay(pdMS_TO_TICKS(currentInterval));
 
-    if (capture_in_progress || sd_write_in_progress || stream_active || (millis() - last_sd_download_time < 8000)) {
-      continue; // Don't interfere with HQ timelapse captures, SD writes, active streams, or active file downloads
+    if (capture_in_progress || sd_write_in_progress || (millis() - last_sd_download_time < 8000)) {
+      continue; // Don't interfere with HQ timelapse captures, SD writes, or active file downloads
     }
 
-    // --- 1. Take a fresh VGA preview snapshot (keeps local webapp live & responsive) ---
-    takePreviewSnapshot();
+    // Only take a sensor preview snapshot when idle and NOT streaming (during active prints, snapshot_buf has parked frames)
+    if (currentPrinterState != "PRINTING" && !stream_active) {
+      takePreviewSnapshot();
+    }
 
     bool wantPrusaConnect = (WiFi.status() == WL_CONNECTED && prusaConnectToken.length() > 0 && prusaConnectFingerprint.length() > 0);
     if (!wantPrusaConnect) {
@@ -1471,15 +1491,9 @@ void setupWebServer() {
     request->send(response);
   });
 
-  // 3. Snapshot endpoint — serves the VGA preview buffer, or takes a fresh capture on ?fresh=1
+  // 3. Snapshot endpoint — serves snapshot_buf directly (populated by parked timelapse or idle preview)
   server.on("/snapshot.jpg", HTTP_GET, [](AsyncWebServerRequest *request){
-    
-    // Manual refresh: user clicked the image in the webapp — take a fresh VGA capture now
-    if (request->hasArg("fresh")) {
-      takePreviewSnapshot();
-    }
-    
-    // Serve the preview buffer (populated either by the 10s background task or the fresh capture above)
+    // Serve the preview buffer directly
     if (snapshot_mutex && xSemaphoreTake(snapshot_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
       if (!snapshot_buf || snapshot_len == 0) {
         xSemaphoreGive(snapshot_mutex);
