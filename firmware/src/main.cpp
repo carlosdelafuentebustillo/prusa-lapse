@@ -22,7 +22,7 @@ int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 3
-#define FIRMWARE_VERSION "v1.3.1"
+#define FIRMWARE_VERSION "v1.3.2"
 
 String deviceMacHex = "";
 String getDeviceMacHex() {
@@ -342,6 +342,176 @@ public:
   }
 };
 
+// Stream synchronization primitives
+volatile bool stream_active = false;
+volatile bool stream_pause_requested = false;
+volatile uint32_t stream_client_id = 0;
+
+#define STREAM_BOUNDARY "frame"
+static const char* STREAM_CONTENT_TYPE = "multipart/x-mixed-replace; boundary=" STREAM_BOUNDARY;
+static const char* STREAM_PART_HEADER = "--" STREAM_BOUNDARY "\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+
+class AsyncJpegStreamResponse : public AsyncAbstractResponse {
+private:
+  uint32_t _thisClientId;
+  uint8_t *_stream_buf;
+  size_t _stream_buf_len;
+  size_t _stream_buf_cap;
+  size_t _sentIndex;
+  uint32_t _lastFrameTime;
+
+public:
+  AsyncJpegStreamResponse(uint32_t clientId)
+    : _thisClientId(clientId), _stream_buf(nullptr), _stream_buf_len(0), _stream_buf_cap(0), _sentIndex(0), _lastFrameTime(0) {
+    _callback = nullptr;
+    _code = 200;
+    _contentLength = 0;
+    _contentType = STREAM_CONTENT_TYPE;
+    _sendContentLength = false;
+    _chunked = true;
+    if (psramFound()) {
+      _stream_buf = (uint8_t *)ps_malloc(96 * 1024);
+      if (_stream_buf) _stream_buf_cap = 96 * 1024;
+    } else {
+      _stream_buf = (uint8_t *)malloc(48 * 1024);
+      if (_stream_buf) _stream_buf_cap = 48 * 1024;
+    }
+  }
+
+  virtual ~AsyncJpegStreamResponse() override {
+    if (_stream_buf) {
+      free(_stream_buf);
+      _stream_buf = nullptr;
+    }
+    if (_thisClientId == stream_client_id) {
+      stream_active = false;
+      if (camera_mutex && xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        sensor_t *s = esp_camera_sensor_get();
+        if (s && psramFound() && s->status.framesize != FRAMESIZE_UXGA) {
+          s->set_framesize(s, FRAMESIZE_UXGA);
+          s->set_quality(s, 10);
+          vTaskDelay(pdMS_TO_TICKS(100));
+          for (int i = 0; i < 2; i++) {
+            camera_fb_t *flush_fb = esp_camera_fb_get();
+            if (flush_fb) esp_camera_fb_return(flush_fb);
+          }
+        }
+        xSemaphoreGive(camera_mutex);
+      }
+    }
+  }
+
+  virtual bool _sourceValid() const override {
+    return (_thisClientId == stream_client_id);
+  }
+
+  virtual size_t _fillBuffer(uint8_t *buf, size_t maxLen) override {
+    if (_thisClientId != stream_client_id) {
+      return 0;
+    }
+
+    if (_sentIndex < _stream_buf_len) {
+      size_t available = _stream_buf_len - _sentIndex;
+      size_t toSend = (maxLen < available) ? maxLen : available;
+      memcpy(buf, _stream_buf + _sentIndex, toSend);
+      _sentIndex += toSend;
+      return toSend;
+    }
+
+    _stream_buf_len = 0;
+    _sentIndex = 0;
+
+    // Check stream_pause_requested: yield and delay up to 1000ms in 50ms slices
+    uint32_t pauseWaited = 0;
+    while (stream_pause_requested && pauseWaited < 1000 && _thisClientId == stream_client_id) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      pauseWaited += 50;
+    }
+    if (_thisClientId != stream_client_id) {
+      return 0;
+    }
+
+    // Frame limiter: ~250ms interval (~4 FPS)
+    uint32_t now = millis();
+    if (_lastFrameTime != 0 && (now - _lastFrameTime) < 250) {
+      uint32_t waitMs = 250 - (now - _lastFrameTime);
+      while (waitMs > 0 && _thisClientId == stream_client_id && !stream_pause_requested) {
+        uint32_t step = (waitMs > 25) ? 25 : waitMs;
+        vTaskDelay(pdMS_TO_TICKS(step));
+        waitMs -= step;
+      }
+    }
+    if (_thisClientId != stream_client_id) {
+      return 0;
+    }
+
+    if (stream_pause_requested) {
+      uint32_t pauseWaited2 = 0;
+      while (stream_pause_requested && pauseWaited2 < 1000 && _thisClientId == stream_client_id) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        pauseWaited2 += 50;
+      }
+      if (_thisClientId != stream_client_id) {
+        return 0;
+      }
+    }
+
+    // Acquire camera_mutex with 150ms timeout
+    if (!camera_mutex || xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(150)) != pdTRUE) {
+      return RESPONSE_TRY_AGAIN;
+    }
+
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+      xSemaphoreGive(camera_mutex);
+      return RESPONSE_TRY_AGAIN;
+    }
+
+    char headerBuf[128];
+    int headerLen = snprintf(headerBuf, sizeof(headerBuf), STREAM_PART_HEADER, fb->len);
+    if (headerLen <= 0) {
+      esp_camera_fb_return(fb);
+      xSemaphoreGive(camera_mutex);
+      return RESPONSE_TRY_AGAIN;
+    }
+
+    size_t totalFrameLen = headerLen + fb->len + 2;
+    if (!_stream_buf || totalFrameLen > _stream_buf_cap) {
+      if (_stream_buf) free(_stream_buf);
+      if (psramFound()) {
+        _stream_buf = (uint8_t *)ps_malloc(totalFrameLen + 8192);
+      } else {
+        _stream_buf = (uint8_t *)malloc(totalFrameLen + 4096);
+      }
+      if (_stream_buf) {
+        _stream_buf_cap = totalFrameLen + (psramFound() ? 8192 : 4096);
+      } else {
+        _stream_buf_cap = 0;
+        esp_camera_fb_return(fb);
+        xSemaphoreGive(camera_mutex);
+        return RESPONSE_TRY_AGAIN;
+      }
+    }
+
+    memcpy(_stream_buf, headerBuf, headerLen);
+    memcpy(_stream_buf + headerLen, fb->buf, fb->len);
+    _stream_buf[headerLen + fb->len] = '\r';
+    _stream_buf[headerLen + fb->len + 1] = '\n';
+    _stream_buf_len = totalFrameLen;
+    _sentIndex = 0;
+
+    esp_camera_fb_return(fb);
+    xSemaphoreGive(camera_mutex);
+
+    _lastFrameTime = millis();
+
+    size_t toSend = (maxLen < _stream_buf_len) ? maxLen : _stream_buf_len;
+    memcpy(buf, _stream_buf, toSend);
+    _sentIndex = toSend;
+    return toSend;
+  }
+};
+
 AsyncWebServer server(80);
 uint8_t *captured_photo_buf = NULL;
 size_t captured_photo_len = 0;
@@ -361,7 +531,11 @@ void captureTask(void *pvParameters) {
     capture_in_progress = true;
     static size_t rollingAvgLen = 0;
     
-    if (camera_mutex && xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(6000)) == pdTRUE) {
+    if (stream_active) {
+      stream_pause_requested = true;
+    }
+
+    if (camera_mutex && xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       sensor_t * s = esp_camera_sensor_get();
       if (!s) {
         Serial.println("captureTask: Sensor not initialized, attempting recovery...");
@@ -376,8 +550,8 @@ void captureTask(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(180)); // let auto-exposure adjust to the light
       }
       
-      // Ensure UXGA without triggering an unnecessary sensor mode reset if already at UXGA
-      if (s && psramFound() && s->status.framesize != FRAMESIZE_UXGA) {
+      // Ensure UXGA without triggering an unnecessary sensor mode reset if already at UXGA (only if stream idle)
+      if (!stream_active && s && psramFound() && s->status.framesize != FRAMESIZE_UXGA) {
         s->set_framesize(s, FRAMESIZE_UXGA);
         vTaskDelay(pdMS_TO_TICKS(250));
       }
@@ -393,7 +567,7 @@ void captureTask(void *pvParameters) {
 
       // Guard against momentary underexposed / dark-green AEC dips:
       // Crushed dark frames compress to <42KB (or <58% of the scene's rolling average JPEG size).
-      bool isDarkAnomaly = fb && (fb->len < 42000 || (rollingAvgLen > 75000 && fb->len < (rollingAvgLen * 58) / 100));
+      bool isDarkAnomaly = (!stream_active) && fb && (fb->len < 42000 || (rollingAvgLen > 75000 && fb->len < (rollingAvgLen * 58) / 100));
       if (isDarkAnomaly) {
         Serial.printf("HQ Capture: Dark/underexposed frame detected (%u bytes vs avg %u). Waiting for AEC settle & re-capturing...\n",
                       (unsigned int)fb->len, (unsigned int)rollingAvgLen);
@@ -412,7 +586,7 @@ void captureTask(void *pvParameters) {
         digitalWrite(4, LOW);
       }
       
-      if (!fb || fb->len < 15000) {
+      if (!fb || fb->len < (stream_active ? 5000 : 15000)) {
         Serial.println("HQ Capture failed or image too small");
         if (fb) esp_camera_fb_return(fb);
         consecutiveCaptureFailures++;
@@ -423,6 +597,7 @@ void captureTask(void *pvParameters) {
           consecutiveCaptureFailures = 0;
         }
         xSemaphoreGive(camera_mutex);
+        stream_pause_requested = false;
         capture_in_progress = false;
         if (pendingLayerCapture && !sd_write_in_progress) {
           pendingLayerCapture = false;
@@ -433,7 +608,7 @@ void captureTask(void *pvParameters) {
       }
       consecutiveCaptureFailures = 0;
 
-      if (fb->len >= 45000) {
+      if (!stream_active && fb->len >= 45000) {
         if (rollingAvgLen == 0) {
           rollingAvgLen = fb->len;
         } else {
@@ -457,7 +632,7 @@ void captureTask(void *pvParameters) {
       if (captured_photo_buf) {
         memcpy(captured_photo_buf, fb->buf, fb->len);
         captured_photo_len = fb->len;
-        Serial.printf("HQ Capture: %d bytes (UXGA, avg=%u)\n", fb->len, (unsigned int)rollingAvgLen);
+        Serial.printf("HQ Capture: %d bytes (%s, avg=%u)\n", fb->len, stream_active ? "SVGA" : "UXGA", (unsigned int)rollingAvgLen);
       }
       
       // Wake up the background SD writer task
@@ -467,8 +642,11 @@ void captureTask(void *pvParameters) {
       
       esp_camera_fb_return(fb);
       
-      // Keep sensor at FRAMESIZE_UXGA when PSRAM is present so AEC/AGC/AWB never resets!
       xSemaphoreGive(camera_mutex);
+      stream_pause_requested = false;
+    } else {
+      Serial.println("captureTask: timeout taking camera_mutex (1000ms)");
+      stream_pause_requested = false;
     }
     
     capture_in_progress = false;
@@ -490,6 +668,7 @@ void triggerCapture() {
 }
 
 void takePreviewSnapshot() {
+  if (stream_active) return; // Do not take preview snapshots if live streaming is active
   if (camera_mutex && xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
     sensor_t * s = esp_camera_sensor_get();
     if (!s) {
@@ -560,8 +739,8 @@ void previewAndUploadTask(void *pvParameters) {
     uint32_t currentInterval = (currentPrinterState == "PRINTING") ? 30000 : 10000;
     vTaskDelay(pdMS_TO_TICKS(currentInterval));
 
-    if (capture_in_progress || sd_write_in_progress || (millis() - last_sd_download_time < 8000)) {
-      continue; // Don't interfere with HQ timelapse captures, SD writes, or active file downloads
+    if (capture_in_progress || sd_write_in_progress || stream_active || (millis() - last_sd_download_time < 8000)) {
+      continue; // Don't interfere with HQ timelapse captures, SD writes, active streams, or active file downloads
     }
 
     // --- 1. Take a fresh VGA preview snapshot (keeps local webapp live & responsive) ---
@@ -1242,6 +1421,54 @@ void setupWebServer() {
     request->send(response);
     
     Serial.println("Sent saved photo via HTTP");
+  });
+
+  // 3. Live MJPEG Stream endpoint (~4 FPS, SVGA, preemptible for timelapse captures)
+  server.on("/stream", HTTP_GET, [](AsyncWebServerRequest *request){
+    stream_client_id++;
+    uint32_t thisClientId = stream_client_id;
+
+    if (stream_active) {
+      uint32_t waitMs = 0;
+      while (stream_active && waitMs < 300) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        waitMs += 20;
+      }
+    }
+
+    stream_active = true;
+
+    if (camera_mutex && xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      sensor_t *s = esp_camera_sensor_get();
+      if (s) {
+        if (s->status.framesize != FRAMESIZE_SVGA) {
+          s->set_framesize(s, FRAMESIZE_SVGA);
+          s->set_quality(s, 12);
+          vTaskDelay(pdMS_TO_TICKS(100));
+          for (int i = 0; i < 2; i++) {
+            camera_fb_t *flush_fb = esp_camera_fb_get();
+            if (flush_fb) esp_camera_fb_return(flush_fb);
+          }
+        }
+      }
+      xSemaphoreGive(camera_mutex);
+    }
+
+    AsyncJpegStreamResponse *response = new AsyncJpegStreamResponse(thisClientId);
+    if (!response) {
+      stream_active = false;
+      request->send(503, "text/plain", "Failed to allocate stream response");
+      return;
+    }
+    response->addHeader("Access-Control-Allow-Origin", "*");
+    response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    response->addHeader("Pragma", "no-cache");
+    request->onDisconnect([thisClientId]() {
+      if (thisClientId == stream_client_id) {
+        stream_active = false;
+      }
+    });
+    request->send(response);
   });
 
   // 3. Snapshot endpoint — serves the VGA preview buffer, or takes a fresh capture on ?fresh=1
