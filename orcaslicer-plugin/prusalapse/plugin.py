@@ -539,17 +539,35 @@ except ImportError:
             psGCodePostProcess = "psGCodePostProcess"
 
     class _MockOrcaExecutionResult:
-        def __init__(self, success: bool = True, message: str = "") -> None:
+        def __init__(
+            self,
+            success: bool = True,
+            message: str = "",
+            status: str | None = None,
+        ) -> None:
             self._success = success
             self._message = message
+            self.message = message
+            if status is not None:
+                self.status = status
+            else:
+                self.status = "success" if success else "failure"
 
         @classmethod
         def success(cls, message: str = "") -> _MockOrcaExecutionResult:
-            return cls(True, message)
+            return cls(True, message, status="success")
+
+        @classmethod
+        def failure(cls, message: str = "") -> _MockOrcaExecutionResult:
+            return cls(False, message, status="failure")
 
         @classmethod
         def fail(cls, message: str = "") -> _MockOrcaExecutionResult:
-            return cls(False, message)
+            return cls.failure(message)
+
+        @classmethod
+        def skipped(cls, message: str = "") -> _MockOrcaExecutionResult:
+            return cls(True, message, status="skipped")
 
         @property
         def is_ok(self) -> bool:
@@ -557,6 +575,9 @@ except ImportError:
 
         def __bool__(self) -> bool:
             return self._success
+
+        def __repr__(self) -> str:
+            return f"<ExecutionResult status={self.status!r} message={self.message!r}>"
 
     class _MockOrcaLogger:
         @staticmethod
@@ -572,7 +593,8 @@ except ImportError:
             pass
 
     class _MockOrcaBase:
-        pass
+        def register_capabilities(self) -> None:
+            pass
 
     class _MockOrca:
         pages = _MockOrcaPages
@@ -580,6 +602,9 @@ except ImportError:
         ExecutionResult = _MockOrcaExecutionResult
         logger = _MockOrcaLogger
         base = _MockOrcaBase
+
+        requested_permissions: dict[str, Any] = {}
+        registered_capabilities: list[Any] = []
 
         @staticmethod
         def plugin(*args: Any, **kwargs: Any):
@@ -589,13 +614,24 @@ except ImportError:
                 return args[0]
             return decorator
 
-        @staticmethod
-        def register_capability(*args: Any, **kwargs: Any) -> None:
-            pass
+        @classmethod
+        def register_capability(cls, target: Any = None, *args: Any, **kwargs: Any) -> None:
+            if target is not None and target not in cls.registered_capabilities:
+                cls.registered_capabilities.append(target)
+            for arg in args:
+                if arg not in cls.registered_capabilities:
+                    cls.registered_capabilities.append(arg)
+            if "capability" in kwargs and kwargs["capability"] not in cls.registered_capabilities:
+                cls.registered_capabilities.append(kwargs["capability"])
 
-        @staticmethod
-        def request_permissions(*args: Any, **kwargs: Any) -> None:
-            pass
+        @classmethod
+        def request_permissions(cls, *args: Any, **kwargs: Any) -> None:
+            cls.requested_permissions.update(kwargs)
+
+        @classmethod
+        def reset_mock(cls) -> None:
+            cls.requested_permissions.clear()
+            cls.registered_capabilities.clear()
 
     orca = _MockOrca()
 

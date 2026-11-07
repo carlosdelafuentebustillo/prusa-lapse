@@ -249,6 +249,56 @@ class TestPluginBridge(unittest.TestCase):
             plugin.on_unload()
             mock_stop.assert_called_once()
 
+    def test_orca_execution_result_contract(self):
+        # Failure result contract
+        fail_res = orca.ExecutionResult.failure("custom failure error")
+        self.assertEqual(fail_res.status, "failure")
+        self.assertEqual(fail_res.message, "custom failure error")
+        self.assertFalse(fail_res.is_ok)
+        self.assertFalse(bool(fail_res))
+
+        # Success result contract
+        ok_res = orca.ExecutionResult.success("success msg")
+        self.assertEqual(ok_res.status, "success")
+        self.assertEqual(ok_res.message, "success msg")
+        self.assertTrue(ok_res.is_ok)
+        self.assertTrue(bool(ok_res))
+
+        # Skipped result contract
+        skip_res = orca.ExecutionResult.skipped("skip msg")
+        self.assertEqual(skip_res.status, "skipped")
+        self.assertEqual(skip_res.message, "skip msg")
+        self.assertTrue(skip_res.is_ok)
+
+    def test_orca_request_permissions_recording(self):
+        orca.request_permissions(
+            network_http=["http://127.0.0.1:3000", "http://localhost:3000"],
+            fs_read=["*"],
+            fs_readwrite=["*"],
+            process=["node", "electron"],
+        )
+        self.assertIn("network_http", orca.requested_permissions)
+        self.assertEqual(
+            orca.requested_permissions["network_http"],
+            ["http://127.0.0.1:3000", "http://localhost:3000"],
+        )
+        self.assertEqual(orca.requested_permissions["process"], ["node", "electron"])
+
+    def test_orca_register_capability_recording(self):
+        class SampleCapability:
+            pass
+
+        orca.register_capability(SampleCapability)
+        self.assertIn(SampleCapability, orca.registered_capabilities)
+
+    def test_orca_base_register_capabilities_method(self):
+        self.assertTrue(hasattr(orca.base, "register_capabilities"))
+        base_instance = orca.base()
+        self.assertTrue(hasattr(base_instance, "register_capabilities"))
+        # Should execute cleanly without raising
+        ret = base_instance.register_capabilities()
+        self.assertIsNone(ret)
+
 
 if __name__ == "__main__":
     unittest.main()
