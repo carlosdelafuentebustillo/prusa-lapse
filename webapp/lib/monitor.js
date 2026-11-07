@@ -1900,12 +1900,13 @@ class MonitorService {
     }
   }
 
-  async compileVideo(sessionId, cameraKey, options = { fps: 30, quality: 23, rotation: 0, filterDark: true }) {
+  async compileVideo(sessionId, cameraKey, options = { fps: 30, quality: 23, rotation: 0, filterDark: true, deflicker: true }) {
     this.isCompiling = true;
     const fps = Number(options?.fps) || 30;
     const quality = Number(options?.quality) || 23;
     const rotation = Number(options?.rotation) || 0;
     const filterDark = options?.filterDark !== false;
+    const deflicker = options?.deflicker !== false;
 
     let folderName;
     if (typeof cameraKey === 'string' && cameraKey.startsWith('camera_')) {
@@ -1923,7 +1924,7 @@ class MonitorService {
       }
     }
 
-    this.log(`Starting video compilation for ${sessionId} (${folderName}, ${fps} FPS, rot=${rotation}°)...`, 'info');
+    this.log(`Starting video compilation for ${sessionId} (${folderName}, ${fps} FPS, rot=${rotation}°, deflicker=${deflicker})...`, 'info');
     
     const camDir = path.join(CAPTURES_DIR, sessionId, folderName);
     const outputPath = path.join(CAPTURES_DIR, sessionId, `${folderName}.mp4`);
@@ -1957,25 +1958,23 @@ class MonitorService {
 
       let validFrames = nonEmptyFrames;
 
-      // 2. Pixel-level dark/green frame detection via FFmpeg blackframe filter (pblack >= 70% at threshold=40)
+      // 2. Luminance & anomaly outlier detection via FFmpeg signalstats (catches underexposed green frames, rogue flashes, toolhead obstructions)
       if (filterDark && nonEmptyFrames.length > 3) {
         const analyzeListPath = path.join(camDir, '_ffmpeg_analyze.txt');
         const analyzeContent = nonEmptyFrames.map(f => `file '${path.join(camDir, f).replace(/\\/g, '/')}'`).join('\n') + '\n';
         await fs.writeFile(analyzeListPath, analyzeContent, 'utf-8');
 
-        const darkIndices = new Set();
+        const yavgList = [];
         await new Promise((resolve) => {
-          const analyzeCmd = `"${ffmpegPath}" -hide_banner -f concat -safe 0 -i "${analyzeListPath}" -vf "blackframe=amount=0:threshold=40" -f null -`;
+          const analyzeCmd = `"${ffmpegPath}" -hide_banner -f concat -safe 0 -i "${analyzeListPath}" -vf "signalstats,metadata=print:key=lavfi.signalstats.YAVG" -f null -`;
           exec(analyzeCmd, { cwd: camDir, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
             const output = (stderr || '') + '\n' + (stdout || '');
-            const regex = /frame:\s*(\d+)\s+pblack:\s*(\d+)/g;
+            const regex = /frame:(\d+)\s+pts:.*?lavfi\.signalstats\.YAVG=([\d\.]+)/gs;
             let match;
             while ((match = regex.exec(output)) !== null) {
               const idx = parseInt(match[1], 10);
-              const pblack = parseInt(match[2], 10);
-              if (pblack >= 70) {
-                darkIndices.add(idx);
-              }
+              const yavg = parseFloat(match[2]);
+              yavgList[idx] = yavg;
             }
             resolve();
           });
@@ -1983,9 +1982,39 @@ class MonitorService {
 
         await fs.rm(analyzeListPath, { force: true }).catch(() => {});
 
-        if (darkIndices.size > 0 && darkIndices.size < nonEmptyFrames.length) {
-          validFrames = nonEmptyFrames.filter((_, idx) => !darkIndices.has(idx));
-          this.log(`Filtered ${darkIndices.size} dark/underexposed frames from ${folderName} (${validFrames.length} clean frames kept).`, 'info');
+        if (yavgList.length === nonEmptyFrames.length) {
+          const sortedY = [...yavgList].sort((a, b) => a - b);
+          const mid = Math.floor(sortedY.length / 2);
+          const globalMedian = sortedY.length % 2 !== 0 ? sortedY[mid] : (sortedY[mid - 1] + sortedY[mid]) / 2;
+
+          const outlierIndices = new Set();
+          for (let i = 0; i < yavgList.length; i++) {
+            const currY = yavgList[i];
+            const win = [];
+            for (let j = Math.max(0, i - 3); j <= Math.min(yavgList.length - 1, i + 3); j++) {
+              if (j !== i) win.push(yavgList[j]);
+            }
+            win.sort((a, b) => a - b);
+            const wMid = Math.floor(win.length / 2);
+            const localMedian = win.length > 0
+              ? (win.length % 2 !== 0 ? win[wMid] : (win[wMid - 1] + win[wMid]) / 2)
+              : globalMedian;
+
+            const diff = Math.abs(currY - localMedian);
+            const isOutlier =
+              diff > 22 ||
+              currY < Math.min(90, globalMedian * 0.70) ||
+              currY > Math.max(170, globalMedian * 1.25);
+
+            if (isOutlier) {
+              outlierIndices.add(i);
+            }
+          }
+
+          if (outlierIndices.size > 0 && outlierIndices.size < nonEmptyFrames.length * 0.35) {
+            validFrames = nonEmptyFrames.filter((_, idx) => !outlierIndices.has(idx));
+            this.log(`Filtered ${outlierIndices.size} flickering/outlier frames from ${folderName} (${validFrames.length} clean frames kept).`, 'info');
+          }
         }
       }
 
@@ -1994,15 +2023,21 @@ class MonitorService {
       const concatLines = validFrames.map(f => `file '${path.join(camDir, f).replace(/\\/g, '/')}'`);
       await fs.writeFile(concatListPath, concatLines.join('\n') + '\n', 'utf-8');
 
-      // 4. Optional rotation filter (90° CW = transpose=1, 90° CCW = transpose=2, 180° = hflip,vflip)
-      let vfArg = '';
+      // 4. Video filter pipeline: rotation + temporal deflickering
+      const filters = [];
       if (rotation === 90) {
-        vfArg = '-vf "transpose=1" ';
+        filters.push('transpose=1');
       } else if (rotation === 270) {
-        vfArg = '-vf "transpose=2" ';
+        filters.push('transpose=2');
       } else if (rotation === 180) {
-        vfArg = '-vf "hflip,vflip" ';
+        filters.push('hflip', 'vflip');
       }
+
+      if (deflicker && validFrames.length >= 5) {
+        filters.push('deflicker=mode=pm:size=10');
+      }
+
+      const vfArg = filters.length > 0 ? `-vf "${filters.join(',')}" ` : '';
 
       const cmd = `"${ffmpegPath}" -y -r ${fps} -f concat -safe 0 -i "${concatListPath}" ${vfArg}-c:v libx264 -crf ${quality} -pix_fmt yuv420p "${outputPath}"`;
 

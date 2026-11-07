@@ -22,7 +22,7 @@ int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 3
-#define FIRMWARE_VERSION "v1.3.2"
+#define FIRMWARE_VERSION "v1.3.3"
 
 String deviceMacHex = "";
 String getDeviceMacHex() {
@@ -557,24 +557,28 @@ void captureTask(void *pvParameters) {
       }
       
       // Flush stale frames from hardware DMA buffers (fb_count=2)
+      // Allow 160ms delay per frame so stale exposures from printer motion are cleared out
       for (int i = 0; i < 2; i++) {
-        vTaskDelay(pdMS_TO_TICKS(80));
+        vTaskDelay(pdMS_TO_TICKS(160));
         camera_fb_t *old_fb = esp_camera_fb_get();
         if (old_fb) esp_camera_fb_return(old_fb);
       }
       
       camera_fb_t *fb = esp_camera_fb_get();
 
-      // Guard against momentary underexposed / dark-green AEC dips:
-      // Crushed dark frames compress to <42KB (or <58% of the scene's rolling average JPEG size).
-      bool isDarkAnomaly = (!stream_active) && fb && (fb->len < 42000 || (rollingAvgLen > 75000 && fb->len < (rollingAvgLen * 58) / 100));
-      if (isDarkAnomaly) {
-        Serial.printf("HQ Capture: Dark/underexposed frame detected (%u bytes vs avg %u). Waiting for AEC settle & re-capturing...\n",
+      // Guard against momentary underexposed or overexposed exposure anomalies:
+      // Crushed dark frames compress to <42KB (or <68% of rolling avg), blowout frames surge >140% of rolling avg
+      bool isExposureAnomaly = (!stream_active) && fb && (
+        fb->len < 42000 || 
+        (rollingAvgLen > 60000 && (fb->len < (rollingAvgLen * 68) / 100 || fb->len > (rollingAvgLen * 140) / 100))
+      );
+      if (isExposureAnomaly) {
+        Serial.printf("HQ Capture: Exposure anomaly detected (%u bytes vs avg %u). Waiting for sensor settle & re-capturing...\n",
                       (unsigned int)fb->len, (unsigned int)rollingAvgLen);
         esp_camera_fb_return(fb);
         fb = NULL;
-        for (int retry = 0; retry < 3; retry++) {
-          vTaskDelay(pdMS_TO_TICKS(160));
+        for (int retry = 0; retry < 2; retry++) {
+          vTaskDelay(pdMS_TO_TICKS(180));
           camera_fb_t *flush_fb = esp_camera_fb_get();
           if (flush_fb) esp_camera_fb_return(flush_fb);
         }
@@ -1005,11 +1009,11 @@ void setupCamera() {
     s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
     s->set_wb_mode(s, 0);        // 0 to 4 (0 = Auto)
     s->set_exposure_ctrl(s, 1);  // 0 = disable , 1 = enable
-    s->set_aec2(s, 1);           // Enable DSP AEC2 to prevent dark-green underexposure
-    s->set_ae_level(s, 1);       // +1 AE bias so printer bed isn't crushed when LED strip is visible
+    s->set_aec2(s, 0);           // Disable DSP AEC2 to prevent aggressive exposure oscillation and flicker
+    s->set_ae_level(s, 0);       // Neutral AE bias for stable exposure across print layers
     s->set_gain_ctrl(s, 1);      // 0 = disable , 1 = enable
     s->set_agc_gain(s, 0);       // 0 to 30
-    s->set_gainceiling(s, GAINCEILING_16X); // Allow up to 16x gain in UXGA mode (was 2x which caused black/green frames)
+    s->set_gainceiling(s, GAINCEILING_4X); // Limit gain to 4x to prevent blowout flashes & noise swings
     s->set_bpc(s, 1);            // Enable black pixel correction
     s->set_wpc(s, 1);            // 0 = disable , 1 = enable
     s->set_raw_gma(s, 1);        // 0 = disable , 1 = enable
