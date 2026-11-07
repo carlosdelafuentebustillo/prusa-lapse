@@ -7,10 +7,21 @@ const AdmZip = require('../webapp/node_modules/adm-zip');
 const pkg = require('../webapp/package.json');
 const VERSION = pkg.version;
 const ROOT_DIR = path.resolve(__dirname, '..');
-const RELEASE_DIR = path.join(ROOT_DIR, 'releases', `v${VERSION}`);
+const RELEASE_ROOT_DIR = path.join(ROOT_DIR, 'releases');
+const RELEASE_DIR = path.join(RELEASE_ROOT_DIR, `v${VERSION}`);
 const STAGING_DIR = path.join(ROOT_DIR, 'dist', 'staging');
 const DESKTOP_DIR = path.join(ROOT_DIR, 'desktop');
 const DESKTOP_DIST_DIR = path.join(DESKTOP_DIR, 'dist');
+
+// Sync desktop/package.json version with webapp/package.json
+const desktopPkgPath = path.join(DESKTOP_DIR, 'package.json');
+if (fs.existsSync(desktopPkgPath)) {
+  const desktopPkg = JSON.parse(fs.readFileSync(desktopPkgPath, 'utf8'));
+  if (desktopPkg.version !== VERSION) {
+    desktopPkg.version = VERSION;
+    fs.writeFileSync(desktopPkgPath, JSON.stringify(desktopPkg, null, 2) + '\n', 'utf8');
+  }
+}
 
 console.log('================================================================');
 console.log(`        PRUSALAPSE MASTER RELEASE BUILD PIPELINE (v${VERSION})   `);
@@ -18,6 +29,25 @@ console.log('================================================================');
 console.log(`Root Directory:    ${ROOT_DIR}`);
 console.log(`Release Directory: ${RELEASE_DIR}`);
 console.log();
+
+// Clean up older releases in releases/ and older version binaries in desktop/dist/
+if (fs.existsSync(RELEASE_ROOT_DIR)) {
+  for (const entry of fs.readdirSync(RELEASE_ROOT_DIR, { withFileTypes: true })) {
+    if (entry.isDirectory() && entry.name !== `v${VERSION}`) {
+      console.log(`  Removing older release directory: releases/${entry.name}`);
+      fs.rmSync(path.join(RELEASE_ROOT_DIR, entry.name), { recursive: true, force: true });
+    }
+  }
+}
+
+if (fs.existsSync(DESKTOP_DIST_DIR)) {
+  for (const entry of fs.readdirSync(DESKTOP_DIST_DIR, { withFileTypes: true })) {
+    if (entry.isFile() && /^PrusaLapse-(Setup-)?\d+\.\d+\.\d+/.test(entry.name) && !entry.name.includes(VERSION)) {
+      console.log(`  Removing older desktop build output: desktop/dist/${entry.name}`);
+      fs.rmSync(path.join(DESKTOP_DIST_DIR, entry.name), { force: true });
+    }
+  }
+}
 
 // Ensure clean directories
 [RELEASE_DIR, STAGING_DIR].forEach((dir) => {
@@ -297,6 +327,25 @@ const releaseNotes = `# PrusaLapse v${VERSION} Release
 
 fs.writeFileSync(path.join(RELEASE_DIR, 'RELEASE_NOTES.md'), releaseNotes);
 console.log('✓ Generated: RELEASE_NOTES.md');
+
+// Clean up temporary staging directories and intermediate unpacked output files
+const distRoot = path.join(ROOT_DIR, 'dist');
+if (fs.existsSync(distRoot)) {
+  fs.rmSync(distRoot, { recursive: true, force: true });
+}
+['win-unpacked', 'linux-unpacked', '.icon-ico', 'builder-debug.yml'].forEach((item) => {
+  const target = path.join(DESKTOP_DIST_DIR, item);
+  if (fs.existsSync(target)) {
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+});
+if (fs.existsSync(DESKTOP_DIST_DIR)) {
+  for (const entry of fs.readdirSync(DESKTOP_DIST_DIR)) {
+    if (entry.endsWith('.blockmap')) {
+      fs.rmSync(path.join(DESKTOP_DIST_DIR, entry), { force: true });
+    }
+  }
+}
 
 console.log('\n================================================================');
 console.log(`[SUCCESS] All v${VERSION} release artifacts built and packaged in:`);
