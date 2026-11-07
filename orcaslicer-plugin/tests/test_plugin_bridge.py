@@ -1,10 +1,19 @@
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
+
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        tomllib = None
 
 # Ensure orcaslicer-plugin root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -241,13 +250,76 @@ class TestPluginBridge(unittest.TestCase):
     def test_plugin_lifecycle(self):
         plugin = PrusaLapsePlugin()
         self.assertEqual(plugin.id, "prusalapse")
-        self.assertEqual(plugin.version, "1.3.5")
+        self.assertEqual(plugin.version, "1.3.7")
+        self.assertEqual(plugin.author, "Carlos de la Fuente Bustillo")
         with patch("prusalapse.plugin.ensure_server_running") as mock_ensure:
             plugin.on_load()
             mock_ensure.assert_called_once()
         with patch("prusalapse.plugin.stop_server_process") as mock_stop:
             plugin.on_unload()
             mock_stop.assert_called_once()
+
+    def test_pep723_script_metadata(self):
+        plugin_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "prusalapse", "plugin.py")
+        )
+        with open(plugin_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        match = re.search(r"^# /// script\r?\n(.*?)\r?\n# ///", content, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(match, "PEP 723 script metadata block '# /// script ... # ///' not found")
+        block_lines = match.group(1).splitlines()
+        toml_lines = []
+        for line in block_lines:
+            self.assertTrue(line.startswith("#"), f"Line in PEP 723 block does not start with '#': {line}")
+            # Strip '#' and optional leading space
+            toml_lines.append(line[1:].lstrip(" ") if line.startswith("# ") else line[1:])
+        toml_content = "\n".join(toml_lines)
+
+        self.assertIsNotNone(tomllib, "A TOML parser (tomllib or tomli) must be available")
+        data = tomllib.loads(toml_content)
+
+        # Root level keys must only contain standard PEP 723 script keys
+        self.assertEqual(data.get("requires-python"), ">=3.10")
+        self.assertEqual(data.get("dependencies"), [])
+        # No redundant root identity keys
+        for forbidden in ("name", "version", "author", "authors", "description"):
+            self.assertNotIn(forbidden, data, f"Redundant root key '{forbidden}' found in PEP 723 metadata")
+
+        # OrcaSlicer plugin tool table
+        self.assertIn("tool", data)
+        self.assertIn("orcaslicer", data["tool"])
+        self.assertIn("plugin", data["tool"]["orcaslicer"])
+        orca_plugin = data["tool"]["orcaslicer"]["plugin"]
+        self.assertEqual(orca_plugin.get("name"), "PrusaLapse")
+        self.assertEqual(orca_plugin.get("version"), "1.3.7")
+        self.assertEqual(orca_plugin.get("author"), "Carlos de la Fuente Bustillo")
+        self.assertIn("description", orca_plugin)
+        self.assertTrue(len(orca_plugin["description"]) > 10)
+
+    def test_plugin_register_capabilities(self):
+        orca.reset_mock()
+        plugin = PrusaLapsePlugin()
+        self.assertTrue(hasattr(plugin, "register_capabilities"))
+        plugin.register_capabilities()
+
+        # Check request_permissions
+        self.assertEqual(
+            orca.requested_permissions.get("network_http"),
+            ["http://127.0.0.1:3000", "http://localhost:3000"],
+        )
+        self.assertEqual(orca.requested_permissions.get("fs_read"), ["*"])
+        self.assertEqual(orca.requested_permissions.get("fs_readwrite"), ["*"])
+        self.assertEqual(orca.requested_permissions.get("process"), ["*"])
+
+        # Check registered capabilities
+        self.assertIn(PrusaLapsePage, orca.registered_capabilities)
+        self.assertIn(PrusaLapseSlicingHook, orca.registered_capabilities)
+
+        # Idempotence: calling again shouldn't fail or duplicate registered capabilities
+        plugin.register_capabilities()
+        self.assertEqual(orca.registered_capabilities.count(PrusaLapsePage), 1)
+        self.assertEqual(orca.registered_capabilities.count(PrusaLapseSlicingHook), 1)
 
     def test_orca_execution_result_contract(self):
         # Failure result contract

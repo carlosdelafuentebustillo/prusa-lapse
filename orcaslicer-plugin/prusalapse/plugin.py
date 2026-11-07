@@ -1,15 +1,12 @@
 # /// script
-# name = "prusalapse"
-# version = "1.3.5"
-# description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
-# authors = [{name = "PrusaLapse"}]
 # requires-python = ">=3.10"
 # dependencies = []
+#
 # [tool.orcaslicer.plugin]
-# name = "prusalapse"
-# version = "1.3.5"
-# author = "PrusaLapse"
-# description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
+# name = "PrusaLapse"
+# description = "Cinematic Multi-Camera Timelapse Controller & G-code Injector"
+# author = "Carlos de la Fuente Bustillo"
+# version = "1.3.7"
 # ///
 """
 OrcaSlicer native plugin implementation for PrusaLapse.
@@ -636,18 +633,6 @@ except ImportError:
     orca = _MockOrca()
 
 
-# Request network and filesystem permissions from OrcaSlicer host runtime
-if hasattr(orca, "request_permissions"):
-    try:
-        orca.request_permissions(
-            network=["http://127.0.0.1:3000", "http://localhost:3000"],
-            fs_read=["*"],
-            fs_readwrite=["*"],
-        )
-    except Exception:
-        pass
-
-
 class PrusaLapsePage(orca.pages.PagesPluginCapabilityBase):
     """OrcaSlicer Page Plugin capability displaying the PrusaLapse web interface."""
 
@@ -934,15 +919,6 @@ class PrusaLapseSlicingHook(orca.slicing.SlicingPipelineCapabilityBase):
         return orca.ExecutionResult.success()
 
 
-# Register capability classes with OrcaSlicer host runtime
-if hasattr(orca, "register_capability"):
-    try:
-        orca.register_capability(PrusaLapsePage)
-        orca.register_capability(PrusaLapseSlicingHook)
-    except Exception:
-        pass
-
-
 # ---------------------------------------------------------------------------
 # Plugin Package Entry Point
 # ---------------------------------------------------------------------------
@@ -953,11 +929,31 @@ _BasePluginClass = getattr(orca, "base", object)
 class PrusaLapsePlugin(_BasePluginClass):
     id = "prusalapse"
     name = "PrusaLapse"
-    version = "1.3.5"
-    description = "Native PrusaLapse dual-camera timelapse integration for OrcaSlicer"
-    author = "PrusaLapse"
+    version = "1.3.7"
+    description = "Cinematic Multi-Camera Timelapse Controller & G-code Injector"
+    author = "Carlos de la Fuente Bustillo"
     page = PrusaLapsePage
     slicing_hook = PrusaLapseSlicingHook
+
+    def register_capabilities(self) -> None:
+        """Called by OrcaSlicer to register capabilities and declare permissions."""
+        if hasattr(orca, "request_permissions"):
+            try:
+                orca.request_permissions(
+                    network_http=["http://127.0.0.1:3000", "http://localhost:3000"],
+                    fs_read=["*"],
+                    fs_readwrite=["*"],
+                    process=["*"],
+                )
+            except Exception:
+                pass
+
+        if hasattr(orca, "register_capability"):
+            try:
+                orca.register_capability(PrusaLapsePage)
+                orca.register_capability(PrusaLapseSlicingHook)
+            except Exception:
+                pass
 
     def on_load(self) -> None:
         try:
