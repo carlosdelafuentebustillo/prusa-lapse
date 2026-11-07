@@ -915,6 +915,7 @@ class PrusaLapseSlicingHook(orca.slicing.SlicingPipelineCapabilityBase):
             logger = getattr(orca, "logger", None)
             if logger and hasattr(logger, "warning"):
                 logger.warning(f"PrusaLapse post-processing error: {e}")
+            return orca.ExecutionResult.failure(f"PrusaLapse post-processing error: {e}")
 
         return orca.ExecutionResult.success()
 

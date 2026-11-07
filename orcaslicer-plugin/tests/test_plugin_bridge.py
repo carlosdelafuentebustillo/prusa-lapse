@@ -201,6 +201,40 @@ class TestPluginBridge(unittest.TestCase):
         res_other = hook.execute(ctx_other)
         self.assertTrue(res_other.is_ok if hasattr(res_other, "is_ok") else res_other)
 
+    @patch("prusalapse.plugin.process_slicing_file")
+    def test_slicing_hook_error_propagation(self, mock_process):
+        hook = PrusaLapseSlicingHook(config_path=self.config_path)
+        gcode_path = os.path.join(self.temp_dir.name, "test_err.gcode")
+        with open(gcode_path, "w", encoding="utf-8") as f:
+            f.write(";AFTER_LAYER_CHANGE\n")
+
+        ctx = MagicMock()
+        ctx.step = getattr(orca.slicing.Step, "psGCodePostProcess", "psGCodePostProcess")
+        ctx.gcode_path = gcode_path
+
+        # Fatal exception during processing returns failure
+        mock_process.side_effect = RuntimeError("I/O error during G-code write")
+        res_fail = hook.execute(ctx)
+        self.assertFalse(res_fail.is_ok)
+        self.assertEqual(res_fail.status, "failure")
+        self.assertIn("PrusaLapse post-processing error: I/O error during G-code write", res_fail.message)
+
+        # Non-matching step returns success
+        ctx_wrong_step = MagicMock()
+        ctx_wrong_step.step = "psOtherStep"
+        ctx_wrong_step.gcode_path = gcode_path
+        res_step = hook.execute(ctx_wrong_step)
+        self.assertTrue(res_step.is_ok)
+        self.assertEqual(res_step.status, "success")
+
+        # Missing or non-existent gcode_path returns success
+        ctx_missing_path = MagicMock()
+        ctx_missing_path.step = getattr(orca.slicing.Step, "psGCodePostProcess", "psGCodePostProcess")
+        ctx_missing_path.gcode_path = os.path.join(self.temp_dir.name, "does_not_exist.gcode")
+        res_missing = hook.execute(ctx_missing_path)
+        self.assertTrue(res_missing.is_ok)
+        self.assertEqual(res_missing.status, "success")
+
     @patch("urllib.request.urlopen")
     def test_is_server_alive(self, mock_urlopen):
         mock_resp = MagicMock()
