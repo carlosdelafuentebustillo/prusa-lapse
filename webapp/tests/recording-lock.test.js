@@ -87,8 +87,7 @@ async function runTests() {
   // Isolate from real network cameras that might be printing right now
   const origGetConfig = monitor.getConfig.bind(monitor);
   monitor.getConfig = async () => ({ cameraIps: [] });
-  delete monitor.knownCameraPrinterStates['192.168.1.101'];
-  delete monitor.knownCameraPrinterStates['192.168.1.102'];
+  monitor.knownCameraPrinterStates = {};
 
   let rec5 = await monitor.isTimelapseRecording();
   assert.strictEqual(rec5.isRecording, false, 'Should be false when camera is FINISHED');

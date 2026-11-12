@@ -289,8 +289,6 @@ export default function Home() {
   const [compilingStatus, setCompilingStatus] = useState(null);
   const [compileOptions, setCompileOptions] = useState({ fps: 30, quality: 23, filterDark: true });
   const [cameraRotations, setCameraRotations] = useState({
-    camera_000000000001: 0,
-    camera_000000000002: 90,
     0: 0,
     1: 90
   });
@@ -891,7 +889,7 @@ export default function Home() {
     const folderName = (typeof camKey === 'string' && camKey.startsWith('camera_')) ? camKey : `camera_${camKey}`;
     const label = camLabel || getCameraDisplayName(folderName);
     setCompilingStatus({ sessionId, camera: folderName, cameraLabel: label });
-    const defaultRot = (folderName === 'camera_000000000002' || label.toLowerCase().includes('x-axis')) ? 90 : 0;
+    const defaultRot = label.toLowerCase().includes('x-axis') ? 90 : 0;
     const rotation = cameraRotations[folderName] ?? defaultRot;
     try {
       const res = await fetch('/api/compile', {
@@ -1554,7 +1552,7 @@ export default function Home() {
               const hasVideo = session.videos.includes(`${camKey}.mp4`);
               const isThisCompiling = compilingStatus?.sessionId === session.id && compilingStatus?.camera === camKey;
               const camLabel = getCameraDisplayName(cam);
-              const defaultRot = (camKey === 'camera_000000000002' || camLabel.toLowerCase().includes('x-axis')) ? 90 : 0;
+              const defaultRot = camLabel.toLowerCase().includes('x-axis') ? 90 : 0;
 
               return (
                 <div key={camKey} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', padding: '8px 12px', background: 'rgba(0,0,0,0.25)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)' }}>
