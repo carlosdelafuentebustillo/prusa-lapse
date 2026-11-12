@@ -43,6 +43,14 @@ Copy the `prusalapse` plugin directory directly into the OrcaSlicer plugins fold
 
 Restart OrcaSlicer after copying the files.
 
+### Enable the Slicing Hook (One-Time per Process Preset)
+OrcaSlicer 2.5+ only executes slicing pipeline plugins that are enabled on the active Process preset:
+
+1. Toggle **Advanced** mode on at the top of the **Process** settings panel.
+2. Open the **Others** tab and scroll to **Plugin Configuration → Slicing Pipeline Plugin**.
+3. Click the selector and enable **PrusaLapse Slicing Hook**.
+4. **Save** the Process preset so every future **Export G-code** and **Print** injects park/capture stops automatically.
+
 ---
 
 ## Directory Structure

@@ -74,7 +74,7 @@ async function runTests() {
     // Test 3: Firmware & Webapp Version Consistency Check
     console.log('\n--- TEST 3: Version Bump & Sensor Stability Compliance ---');
     const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
-    assert.strictEqual(pkg.version, '1.3.7', 'webapp/package.json version must be 1.3.7');
+    assert.strictEqual(pkg.version, '1.3.8', 'webapp/package.json version must be 1.3.8');
     console.log(`  ✓ Step 3.1: webapp/package.json version is ${pkg.version}`);
 
     const mainCpp = fs.readFileSync(path.resolve(__dirname, '../../firmware/src/main.cpp'), 'utf8');

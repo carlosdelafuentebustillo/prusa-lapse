@@ -1221,3 +1221,130 @@ select.input-field option {
   align-items: center;
   gap: 8px;
 }
+
+/* ============================================
+   ORCASLICER HOOK WALKTHROUGH
+   ============================================ */
+
+.orca-guide {
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.orca-guide-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.orca-guide-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.orca-guide-play-btn {
+  width: auto;
+  padding: 2px 10px;
+  font-size: 0.72rem;
+  flex-shrink: 0;
+}
+
+.orca-guide-body {
+  display: grid;
+  grid-template-columns: minmax(240px, 310px) 1fr;
+  gap: 14px;
+  align-items: center;
+}
+
+@media (max-width: 640px) {
+  .orca-guide-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+.orca-mockup {
+  width: 100%;
+  aspect-ratio: 260 / 156;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.orca-mockup-svg {
+  display: block;
+}
+
+.orca-guide-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.orca-guide-step-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 0.76rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+
+.orca-guide-step-row:hover {
+  border-color: rgba(0, 150, 136, 0.45);
+  color: var(--text-primary);
+}
+
+.orca-guide-step-row.is-active {
+  background: rgba(0, 150, 136, 0.16);
+  border-color: rgba(0, 150, 136, 0.6);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.orca-guide-step-num {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.orca-guide-step-row.is-active .orca-guide-step-num {
+  background: #009688;
+  color: #fff;
+}
+
+.orca-guide-hint {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .orca-mockup-cursor {
+    transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .orca-anim-prop {
+    transition: opacity 0.25s ease;
+  }
+}

@@ -232,16 +232,16 @@ function runTests() {
   // =========================================================================
   console.log('--- SUITE 5: Repository Version Consistency & Cross-Component Contracts ---');
 
-  // 1. Webapp package.json version check (1.3.7)
+  // 1. Webapp package.json version check (1.3.8)
   const pkgPath = path.join(__dirname, '../package.json');
   assert.ok(fs.existsSync(pkgPath), 'webapp/package.json must exist');
   const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
   assert.strictEqual(
     pkg.version,
-    '1.3.7',
-    `webapp/package.json version must be 1.3.7 (found: ${pkg.version})`
+    '1.3.8',
+    `webapp/package.json version must be 1.3.8 (found: ${pkg.version})`
   );
-  console.log('  ✓ Step 5.1: Webapp package.json version is 1.3.7');
+  console.log('  ✓ Step 5.1: Webapp package.json version is 1.3.8');
 
   // 2. Firmware version check (v1.3.3)
   const firmwareVersionMatch = mainCppSrc.match(/#define\s+FIRMWARE_VERSION\s+"([^"]+)"/);

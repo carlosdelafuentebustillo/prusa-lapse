@@ -6,7 +6,7 @@
 # name = "PrusaLapse"
 # description = "Cinematic Multi-Camera Timelapse Controller & G-code Injector"
 # author = "Carlos de la Fuente Bustillo"
-# version = "1.3.7"
+# version = "1.3.8"
 # ///
 """
 OrcaSlicer native plugin implementation for PrusaLapse.
@@ -136,7 +136,7 @@ def find_server_components() -> tuple[str | None, str | None, dict[str, str]]:
     if appdata:
         pl_dir = os.path.join(appdata, "PrusaLapse")
         try:
-            os.makedirs(pl_dir, exist_ok=True)
+            ensure_dir(pl_dir)
             target_cfg = os.path.join(pl_dir, "prusa-lapse.config.json")
             extra_env["PRUSALAPSE_CONFIG_FILE"] = target_cfg
             extra_env["PRUSALAPSE_CAPTURES_DIR"] = os.path.join(pl_dir, "captures")
@@ -410,20 +410,26 @@ def load_local_config(config_path: str | None = None) -> dict[str, Any]:
         return dict(DEFAULT_CONFIG)
 
 
+def ensure_dir(path: str) -> None:
+    """Create a directory only when it is missing.
+
+    OrcaSlicer's plugin sandbox audits os.mkdir as a create event even when the
+    folder already exists, so os.makedirs(exist_ok=True) on an existing folder
+    triggers a "Plugin operation denied" dialog.
+    """
+    if path and not os.path.isdir(path):
+        os.makedirs(path, exist_ok=True)
+
+
 def save_local_config(data: dict[str, Any], config_path: str | None = None) -> None:
-    """Persist local configuration dictionary to JSON file atomically."""
+    """Persist local configuration dictionary to JSON file in place."""
     if config_path is None:
         config_path = get_default_config_path()
 
-    target_dir = os.path.dirname(os.path.abspath(config_path))
-    os.makedirs(target_dir, exist_ok=True)
+    ensure_dir(os.path.dirname(os.path.abspath(config_path)))
 
-    temp_path = os.path.join(
-        target_dir, f".config.tmp.{os.getpid()}"
-    )
-    with open(temp_path, "w", encoding="utf-8") as f:
+    with open(config_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
-    os.replace(temp_path, config_path)
 
 
 # ---------------------------------------------------------------------------
@@ -502,13 +508,9 @@ def process_slicing_file(
     gcode_text = raw_bytes.decode("utf-8", errors="replace")
     modified_text, count = inject_timelapse_gcode(gcode_text, injection_cfg)
 
-    dir_name = os.path.dirname(os.path.abspath(gcode_path))
-    temp_path = os.path.join(
-        dir_name, f".{os.path.basename(gcode_path)}.tmp.{os.getpid()}"
-    )
-    with open(temp_path, "w", encoding="utf-8", newline="") as f:
+    # OrcaSlicer expects psGCodePostProcess plugins to edit ctx.gcode_path in place.
+    with open(gcode_path, "w", encoding="utf-8", newline="") as f:
         f.write(modified_text)
-    os.replace(temp_path, gcode_path)
 
     return {"status": "success", "injected_layers": count}
 
@@ -884,7 +886,13 @@ class PrusaLapsePage(orca.pages.PagesPluginCapabilityBase):
 
 
 class PrusaLapseSlicingHook(orca.slicing.SlicingPipelineCapabilityBase):
-    """OrcaSlicer Slicing Pipeline capability intercepting psGCodePostProcess."""
+    """OrcaSlicer Slicing Pipeline capability intercepting psGCodePostProcess.
+
+    OrcaSlicer only runs this hook for Process presets that reference it:
+    Process -> Others -> Plugin Configuration -> Slicing Pipeline Plugin ->
+    add "PrusaLapse Slicing Hook", then save the preset. Once enabled it runs
+    for both Export G-code and Print (send to printer).
+    """
 
     def __init__(self, config_path: str | None = None) -> None:
         super().__init__()
@@ -926,11 +934,18 @@ class PrusaLapseSlicingHook(orca.slicing.SlicingPipelineCapabilityBase):
 
 _BasePluginClass = getattr(orca, "base", object)
 
+
+def _permission_folder_tree(path: str) -> str:
+    """Format an absolute directory path as an OrcaSlicer /* tree permission."""
+    norm = os.path.abspath(path).replace("\\", "/").rstrip("/")
+    return f"{norm}/*"
+
+
 @orca.plugin
 class PrusaLapsePlugin(_BasePluginClass):
     id = "prusalapse"
     name = "PrusaLapse"
-    version = "1.3.7"
+    version = "1.3.8"
     description = "Cinematic Multi-Camera Timelapse Controller & G-code Injector"
     author = "Carlos de la Fuente Bustillo"
     page = PrusaLapsePage
@@ -938,12 +953,28 @@ class PrusaLapsePlugin(_BasePluginClass):
 
     def register_capabilities(self) -> None:
         """Called by OrcaSlicer to register capabilities and declare permissions."""
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        temp_dir = tempfile.gettempdir()
+        appdata = os.environ.get("APPDATA")
+        prusalapse_dir = (
+            os.path.join(appdata, "PrusaLapse") if appdata else plugin_dir
+        )
+        fs_trees = list(
+            dict.fromkeys(
+                [
+                    _permission_folder_tree(plugin_dir),
+                    _permission_folder_tree(temp_dir),
+                    _permission_folder_tree(prusalapse_dir),
+                ]
+            )
+        )
+
         if hasattr(orca, "request_permissions"):
             try:
                 orca.request_permissions(
                     network_http=["http://127.0.0.1:3000", "http://localhost:3000"],
-                    fs_read=["*"],
-                    fs_readwrite=["*"],
+                    fs_read=fs_trees,
+                    fs_readwrite=fs_trees,
                     process=["*"],
                 )
             except Exception:

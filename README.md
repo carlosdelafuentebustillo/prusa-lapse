@@ -70,7 +70,7 @@ Then browse to `http://<YOUR_SERVER_IP>:3000`. All timelapses (`./captures`) and
 ### 1. OrcaSlicer 2.5+ Native Plugin (Recommended)
 1. Open the PrusaLapse Dashboard and navigate to **Slicer Integration -> OrcaSlicer**.
 2. Click **Install Plugin into OrcaSlicer** and restart OrcaSlicer (or manually extract `prusalapse-orcaslicer-plugin.zip` into `%APPDATA%\OrcaSlicer\orca_plugins\` on Windows, `~/Library/Application Support/OrcaSlicer/orca_plugins/` on macOS, or `~/.config/OrcaSlicer/orca_plugins/` on Linux).
-3. Enable **Auto-Inject OrcaSlicer** in the Slicer panel to automatically inject toolhead parking and `M220 S99` triggers on every slice.
+3. In OrcaSlicer, enable **Advanced** mode, open **Process → Others → Plugin Configuration → Slicing Pipeline Plugin**, select **PrusaLapse Slicing Hook**, and save your Process preset. Both **Export G-code** and **Print** will now inject toolhead parking and `M220 S99` triggers automatically.
 
 ### 2. Built-in Web G-Code Post-Processor (PrusaSlicer / Any Slicer)
 Drag and drop any ASCII `.gcode` file into the **Slicer Integration** panel in the PrusaLapse UI to preview the 3D toolpath and download the trigger-injected G-code in one click.

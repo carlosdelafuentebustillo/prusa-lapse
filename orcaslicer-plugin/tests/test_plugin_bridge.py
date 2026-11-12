@@ -19,6 +19,7 @@ except ImportError:
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from prusalapse.plugin import (
+    ensure_dir,
     load_local_config,
     save_local_config,
     process_slicing_file,
@@ -284,7 +285,7 @@ class TestPluginBridge(unittest.TestCase):
     def test_plugin_lifecycle(self):
         plugin = PrusaLapsePlugin()
         self.assertEqual(plugin.id, "prusalapse")
-        self.assertEqual(plugin.version, "1.3.7")
+        self.assertEqual(plugin.version, "1.3.8")
         self.assertEqual(plugin.author, "Carlos de la Fuente Bustillo")
         with patch("prusalapse.plugin.ensure_server_running") as mock_ensure:
             plugin.on_load()
@@ -326,7 +327,7 @@ class TestPluginBridge(unittest.TestCase):
         self.assertIn("plugin", data["tool"]["orcaslicer"])
         orca_plugin = data["tool"]["orcaslicer"]["plugin"]
         self.assertEqual(orca_plugin.get("name"), "PrusaLapse")
-        self.assertEqual(orca_plugin.get("version"), "1.3.7")
+        self.assertEqual(orca_plugin.get("version"), "1.3.8")
         self.assertEqual(orca_plugin.get("author"), "Carlos de la Fuente Bustillo")
         self.assertIn("description", orca_plugin)
         self.assertTrue(len(orca_plugin["description"]) > 10)
@@ -337,13 +338,18 @@ class TestPluginBridge(unittest.TestCase):
         self.assertTrue(hasattr(plugin, "register_capabilities"))
         plugin.register_capabilities()
 
-        # Check request_permissions
+        # Check request_permissions uses valid OrcaSlicer /* folder trees
         self.assertEqual(
             orca.requested_permissions.get("network_http"),
             ["http://127.0.0.1:3000", "http://localhost:3000"],
         )
-        self.assertEqual(orca.requested_permissions.get("fs_read"), ["*"])
-        self.assertEqual(orca.requested_permissions.get("fs_readwrite"), ["*"])
+        fs_read = orca.requested_permissions.get("fs_read", [])
+        fs_readwrite = orca.requested_permissions.get("fs_readwrite", [])
+        self.assertTrue(len(fs_read) >= 2)
+        self.assertEqual(fs_read, fs_readwrite)
+        for target in fs_readwrite:
+            self.assertTrue(target.endswith("/*"), f"Expected /* tree permission, got {target!r}")
+            self.assertNotIn("\\", target)
         self.assertEqual(orca.requested_permissions.get("process"), ["*"])
 
         # Check registered capabilities
@@ -404,6 +410,36 @@ class TestPluginBridge(unittest.TestCase):
         # Should execute cleanly without raising
         ret = base_instance.register_capabilities()
         self.assertIsNone(ret)
+
+    def test_ensure_dir_skips_makedirs_for_existing_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("prusalapse.plugin.os.makedirs") as mock_makedirs:
+                ensure_dir(tmpdir)
+                mock_makedirs.assert_not_called()
+
+            new_dir = os.path.join(tmpdir, "nested", "subdir")
+            ensure_dir(new_dir)
+            self.assertTrue(os.path.isdir(new_dir))
+
+    def test_in_place_writes_avoid_os_replace(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, "config.json")
+            gcode_path = os.path.join(tmpdir, "sample.gcode")
+            with open(gcode_path, "w", encoding="utf-8") as f:
+                f.write(";AFTER_LAYER_CHANGE\nG1 X10 Y10\n")
+
+            with patch("prusalapse.plugin.os.replace") as mock_replace, patch(
+                "prusalapse.plugin.fetch_remote_config",
+                return_value={"parkX": 240, "parkY": 200},
+            ):
+                save_local_config({"host": "http://127.0.0.1:3000", "enabled": True}, cfg_path)
+                res = process_slicing_file(gcode_path, cfg_path)
+                mock_replace.assert_not_called()
+
+            self.assertEqual(res.get("status"), "success")
+            self.assertEqual(res.get("injected_layers"), 1)
+            with open(gcode_path, "r", encoding="utf-8") as f:
+                self.assertIn("M220 S99", f.read())
 
 
 if __name__ == "__main__":
