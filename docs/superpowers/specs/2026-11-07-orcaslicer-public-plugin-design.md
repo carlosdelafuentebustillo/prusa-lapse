@@ -2,8 +2,8 @@
 
 **Date:** 2026-11-07  
 **Status:** Pending Approval  
-**Workspace:** `dual-dalmatian` (`.\prusa-lapse`)  
-**Target Component:** [`orcaslicer-plugin/prusalapse/plugin.py`](orcaslicer-plugin/prusalapse/plugin.py)
+**Workspace:** `prusa-lapse`  
+**Target Component:** [`orcaslicer-plugin/prusalapse/plugin.py`](../../../orcaslicer-plugin/prusalapse/plugin.py)
 
 ---
 
@@ -151,7 +151,7 @@ class PrusaLapseSlicingHook(orca.slicing.SlicingPipelineCapabilityBase):
 ```
 
 ### 4.4. Mock / Offline Compatibility Layer
-Update `_MockOrca` in [`plugin.py`](orcaslicer-plugin/prusalapse/plugin.py) so:
+Update `_MockOrca` in [`plugin.py`](../../../orcaslicer-plugin/prusalapse/plugin.py) so:
 - `_MockOrca.base` has a `register_capabilities(self)` stub.
 - `_MockOrca.request_permissions(**kwargs)` captures declared permissions for inspection in tests.
 - `_MockOrca.register_capability(cls)` tracks registered capability classes.

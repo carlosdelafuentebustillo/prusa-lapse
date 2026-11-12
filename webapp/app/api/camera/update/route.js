@@ -12,8 +12,7 @@ function findLatestFirmware() {
     path.resolve(process.cwd(), 'public/firmware.bin'),
     path.resolve(process.cwd(), '../public/firmware.bin'),
     path.resolve(process.cwd(), 'firmware.bin'),
-    path.resolve(process.cwd(), '../firmware.bin'),
-    './prusa-lapse/firmware/.pio/build/esp32cam/firmware.bin'
+    path.resolve(process.cwd(), '../firmware.bin')
   ];
 
   for (const p of candidatePaths) {
@@ -32,8 +31,7 @@ function findLatestFirmware() {
 function getFirmwareVersion() {
   const sourcePaths = [
     path.resolve(process.cwd(), '../firmware/src/main.cpp'),
-    path.resolve(process.cwd(), 'firmware/src/main.cpp'),
-    './prusa-lapse/firmware/src/main.cpp'
+    path.resolve(process.cwd(), 'firmware/src/main.cpp')
   ];
 
   for (const sp of sourcePaths) {

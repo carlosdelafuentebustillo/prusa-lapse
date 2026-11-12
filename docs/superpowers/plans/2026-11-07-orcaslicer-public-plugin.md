@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10+, OrcaSlicer CPython embedded plugin API (`orca.base`, `orca.slicing`, `orca.pages`, `orca.ExecutionResult`), `unittest`.
 
-**Spec:** [`docs/superpowers/specs/2026-11-07-orcaslicer-public-plugin-design.md`](docs/superpowers/specs/2026-11-07-orcaslicer-public-plugin-design.md)
+**Spec:** [`docs/superpowers/specs/2026-11-07-orcaslicer-public-plugin-design.md`](../specs/2026-11-07-orcaslicer-public-plugin-design.md)
 
 ---
 
@@ -33,8 +33,8 @@
 ### Task 1: Offline Mock Harness & ExecutionResult Enhancements
 
 **Files:**
-- Modify: [`orcaslicer-plugin/prusalapse/plugin.py:560-615`](orcaslicer-plugin/prusalapse/plugin.py#L560-L615)
-- Test: [`orcaslicer-plugin/tests/test_plugin_bridge.py`](orcaslicer-plugin/tests/test_plugin_bridge.py)
+- Modify: [`orcaslicer-plugin/prusalapse/plugin.py:560-615`](../../../orcaslicer-plugin/prusalapse/plugin.py#L560-L615)
+- Test: [`orcaslicer-plugin/tests/test_plugin_bridge.py`](../../../orcaslicer-plugin/tests/test_plugin_bridge.py)
 
 - [ ] Step 1: Write unit tests in `test_plugin_bridge.py` verifying `orca.ExecutionResult.failure(msg)` sets status to `"failure"` and stores message, and `orca.request_permissions` records arguments.
 - [ ] Step 2: Run `python -m unittest orcaslicer-plugin/tests/test_plugin_bridge.py` and confirm failure on unenhanced mock.
@@ -51,8 +51,8 @@
 ### Task 2: PEP 723 Metadata & Plugin Package Class Registration
 
 **Files:**
-- Modify: [`orcaslicer-plugin/prusalapse/plugin.py:1-25`](orcaslicer-plugin/prusalapse/plugin.py#L1-L25), [`orcaslicer-plugin/prusalapse/plugin.py:900-940`](orcaslicer-plugin/prusalapse/plugin.py#L900-L940)
-- Test: [`orcaslicer-plugin/tests/test_plugin_bridge.py`](orcaslicer-plugin/tests/test_plugin_bridge.py)
+- Modify: [`orcaslicer-plugin/prusalapse/plugin.py:1-25`](../../../orcaslicer-plugin/prusalapse/plugin.py#L1-L25), [`orcaslicer-plugin/prusalapse/plugin.py:900-940`](../../../orcaslicer-plugin/prusalapse/plugin.py#L900-L940)
+- Test: [`orcaslicer-plugin/tests/test_plugin_bridge.py`](../../../orcaslicer-plugin/tests/test_plugin_bridge.py)
 
 - [ ] Step 1: Write unit tests in `test_plugin_bridge.py` to:
   - Test PEP 723 script metadata header using TOML/regex matching (`name = "PrusaLapse"`, `version = "1.3.7"`, `author = "Carlos de la Fuente Bustillo"`).
@@ -72,8 +72,8 @@
 ### Task 3: Slicing Pipeline Capability Error Propagation
 
 **Files:**
-- Modify: [`orcaslicer-plugin/prusalapse/plugin.py:865-900`](orcaslicer-plugin/prusalapse/plugin.py#L865-L900)
-- Test: [`orcaslicer-plugin/tests/test_plugin_bridge.py`](orcaslicer-plugin/tests/test_plugin_bridge.py)
+- Modify: [`orcaslicer-plugin/prusalapse/plugin.py:865-900`](../../../orcaslicer-plugin/prusalapse/plugin.py#L865-L900)
+- Test: [`orcaslicer-plugin/tests/test_plugin_bridge.py`](../../../orcaslicer-plugin/tests/test_plugin_bridge.py)
 
 - [ ] Step 1: Write unit test verifying `PrusaLapseSlicingHook.execute(ctx)` returns `ExecutionResult.failure(...)` when `process_slicing_file` raises an exception or fails fatally.
 - [ ] Step 2: Run test and confirm failure (currently returns `success()` on error).
@@ -86,9 +86,9 @@
 ### Task 4: Full Test Suite & End-to-End Verification
 
 **Files:**
-- Test: [`orcaslicer-plugin/tests/test_plugin_bridge.py`](orcaslicer-plugin/tests/test_plugin_bridge.py)
-- Test: [`orcaslicer-plugin/tests/test_injector.py`](orcaslicer-plugin/tests/test_injector.py)
-- Test: [`webapp/tests/slicer-api.test.js`](webapp/tests/slicer-api.test.js)
+- Test: [`orcaslicer-plugin/tests/test_plugin_bridge.py`](../../../orcaslicer-plugin/tests/test_plugin_bridge.py)
+- Test: [`orcaslicer-plugin/tests/test_injector.py`](../../../orcaslicer-plugin/tests/test_injector.py)
+- Test: [`webapp/tests/slicer-api.test.js`](../../../webapp/tests/slicer-api.test.js)
 
 - [ ] Step 1: Run all Python unit tests: `python -m unittest discover -s orcaslicer-plugin/tests -p "test_*.py"`.
 - [ ] Step 2: Run Slicer API integration tests: `node webapp/tests/slicer-api.test.js`.

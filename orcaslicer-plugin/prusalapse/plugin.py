@@ -92,9 +92,6 @@ def find_server_components() -> tuple[str | None, str | None, dict[str, str]]:
                 "server.js",
             )
         ),
-        os.path.abspath(
-            r".\prusa-lapse\webapp\.next\standalone\server.js"
-        ),
     ]
 
     selected_script = None
@@ -146,7 +143,6 @@ def find_server_components() -> tuple[str | None, str | None, dict[str, str]]:
                 cfg_candidates = [
                     os.path.abspath(os.path.join(os.path.dirname(selected_script), "..", "..", "prusa-lapse.config.json")),
                     os.path.abspath(os.path.join(os.path.dirname(selected_script), "prusa-lapse.config.json")),
-                    r".\prusa-lapse\webapp\prusa-lapse.config.json",
                     r"C:\Program Files\PrusaLapse\resources\app\app\prusa-lapse.config.json",
                     os.path.join(local_app_data, "Programs", "PrusaLapse", "resources", "app", "app", "prusa-lapse.config.json"),
                 ]
