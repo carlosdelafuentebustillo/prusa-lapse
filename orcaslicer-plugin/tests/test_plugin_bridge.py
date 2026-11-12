@@ -285,7 +285,7 @@ class TestPluginBridge(unittest.TestCase):
     def test_plugin_lifecycle(self):
         plugin = PrusaLapsePlugin()
         self.assertEqual(plugin.id, "prusalapse")
-        self.assertEqual(plugin.version, "1.3.8")
+        self.assertEqual(plugin.version, "1.3.9")
         self.assertEqual(plugin.author, "Carlos de la Fuente Bustillo")
         with patch("prusalapse.plugin.ensure_server_running") as mock_ensure:
             plugin.on_load()
@@ -327,7 +327,7 @@ class TestPluginBridge(unittest.TestCase):
         self.assertIn("plugin", data["tool"]["orcaslicer"])
         orca_plugin = data["tool"]["orcaslicer"]["plugin"]
         self.assertEqual(orca_plugin.get("name"), "PrusaLapse")
-        self.assertEqual(orca_plugin.get("version"), "1.3.8")
+        self.assertEqual(orca_plugin.get("version"), "1.3.9")
         self.assertEqual(orca_plugin.get("author"), "Carlos de la Fuente Bustillo")
         self.assertIn("description", orca_plugin)
         self.assertTrue(len(orca_plugin["description"]) > 10)

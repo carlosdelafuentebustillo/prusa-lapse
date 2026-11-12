@@ -35,6 +35,20 @@ if (fs.existsSync(destPublic)) {
 }
 fs.cpSync(srcPublic, destPublic, { recursive: true });
 
+// Ensure latest compiled ESP32-CAM firmware.bin and its version metadata are staged for OTA updates
+const builtFirmwareBin = path.join(rootDir, 'firmware', '.pio', 'build', 'esp32cam', 'firmware.bin');
+if (fs.existsSync(builtFirmwareBin)) {
+  fs.copyFileSync(builtFirmwareBin, path.join(srcPublic, 'firmware.bin'));
+  fs.copyFileSync(builtFirmwareBin, path.join(destPublic, 'firmware.bin'));
+}
+const firmwareMainCpp = path.join(rootDir, 'firmware', 'src', 'main.cpp');
+if (fs.existsSync(firmwareMainCpp)) {
+  const fwMatch = fs.readFileSync(firmwareMainCpp, 'utf8').match(/#define\s+FIRMWARE_VERSION\s+"([^"]+)"/);
+  if (fwMatch && fwMatch[1]) {
+    fs.writeFileSync(path.join(destPublic, 'firmware-version.txt'), fwMatch[1] + '\n', 'utf8');
+  }
+}
+
 console.log('[Desktop Stager] Copying ffmpeg and curl binaries to desktop/bin...');
 const ffmpegSrc = path.join(rootDir, 'webapp', 'node_modules', '@ffmpeg-installer', 'win32-x64', 'ffmpeg.exe');
 if (fs.existsSync(ffmpegSrc)) {

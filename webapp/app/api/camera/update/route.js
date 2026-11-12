@@ -4,49 +4,7 @@ import path from 'path';
 import http from 'http';
 import os from 'os';
 import { execFile } from 'child_process';
-
-function findLatestFirmware() {
-  const candidatePaths = [
-    path.resolve(process.cwd(), '../firmware/.pio/build/esp32cam/firmware.bin'),
-    path.resolve(process.cwd(), 'firmware/.pio/build/esp32cam/firmware.bin'),
-    path.resolve(process.cwd(), 'public/firmware.bin'),
-    path.resolve(process.cwd(), '../public/firmware.bin'),
-    path.resolve(process.cwd(), 'firmware.bin'),
-    path.resolve(process.cwd(), '../firmware.bin')
-  ];
-
-  for (const p of candidatePaths) {
-    try {
-      if (fs.existsSync(p)) {
-        const stats = fs.statSync(p);
-        if (stats.size > 100000) { // Valid binary > 100KB
-          return { path: p, stats };
-        }
-      }
-    } catch (e) {}
-  }
-  return null;
-}
-
-function getFirmwareVersion() {
-  const sourcePaths = [
-    path.resolve(process.cwd(), '../firmware/src/main.cpp'),
-    path.resolve(process.cwd(), 'firmware/src/main.cpp')
-  ];
-
-  for (const sp of sourcePaths) {
-    try {
-      if (fs.existsSync(sp)) {
-        const text = fs.readFileSync(sp, 'utf8');
-        const match = text.match(/#define\s+FIRMWARE_VERSION\s+"([^"]+)"/);
-        if (match && match[1]) {
-          return match[1];
-        }
-      }
-    } catch (e) {}
-  }
-  return 'v1.2.1';
-}
+import { findLatestFirmware, getFirmwareVersion } from './utils.js';
 
 function formatBytes(bytes) {
   if (!bytes) return '0 B';
@@ -59,7 +17,6 @@ function formatBytes(bytes) {
 export async function GET() {
   try {
     const latest = findLatestFirmware();
-    const version = getFirmwareVersion();
 
     if (!latest) {
       return NextResponse.json({
@@ -67,6 +24,8 @@ export async function GET() {
         message: 'No compiled firmware.bin found on server.'
       });
     }
+
+    const version = getFirmwareVersion(latest.path);
 
     return NextResponse.json({
       available: true,

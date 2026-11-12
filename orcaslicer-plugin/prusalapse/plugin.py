@@ -6,7 +6,7 @@
 # name = "PrusaLapse"
 # description = "Cinematic Multi-Camera Timelapse Controller & G-code Injector"
 # author = "Carlos de la Fuente Bustillo"
-# version = "1.3.8"
+# version = "1.3.9"
 # ///
 """
 OrcaSlicer native plugin implementation for PrusaLapse.
@@ -332,7 +332,11 @@ def inject_timelapse_gcode(
     )
     target_marker = ";AFTER_LAYER_CHANGE" if has_after_layer else ";LAYER_CHANGE"
 
-    snippet_lines = [START_MARKER]
+    retract_len = float(config.get("retractLength", config.get("retract_length", 0.7)))
+
+    snippet_lines = [START_MARKER, "M83 ; Strict relative extrusion"]
+    if retract_len > 0:
+        snippet_lines.append(f"G1 E-{retract_len:g} F2100 ; Retract before parking")
     if z_hop > 0:
         snippet_lines.extend([
             "G91 ; Relative positioning",
@@ -340,8 +344,8 @@ def inject_timelapse_gcode(
             "G90 ; Absolute positioning",
         ])
     snippet_lines.extend([
-        "M83 ; Strict relative extrusion",
         f"G1 X{target_x:.1f} Y{target_y:.1f} F9000",
+        "M400 ; Wait for park move to complete",
         f"G4 P{settle_time} ; Settle delay",
         "M220 S99 ; Trigger camera capture via PrusaLink",
         f"G4 P{capture_time} ; Dwell for multi-camera capture",
@@ -352,14 +356,24 @@ def inject_timelapse_gcode(
             "G91 ; Relative positioning",
             f"G1 Z-{z_hop:.1f} F600 ; Restore Z height",
             "G90 ; Absolute positioning",
-            "G1 F9000 ; Restore normal travel feedrate",
         ])
-    snippet_lines.append(END_MARKER)
+    if retract_len > 0:
+        snippet_lines.append(f"G1 E{retract_len:g} F1500 ; Unretract after parking")
+    snippet_lines.extend([
+        "G1 F9000 ; Restore normal travel feedrate",
+        END_MARKER,
+    ])
 
     injected_block = "".join(l + nl for l in snippet_lines)
 
+    # Skip Layer 0 (initial marker before Layer 1 starts) when multiple layers exist,
+    # matching PrusaSlicer's `{if layer_num > 0}` so purge-to-first-layer never drags ooze.
+    total_markers = sum(1 for line in lines if _matches_marker(line, target_marker))
+    skip_first_layer = bool(config.get("skipFirstLayer", config.get("skip_first_layer", True))) and total_markers > 1
+
     output: list[str] = []
     count = 0
+    seen_markers = 0
     i = 0
     num_lines = len(lines)
 
@@ -367,7 +381,11 @@ def inject_timelapse_gcode(
         line = lines[i]
         output.append(line)
         if _matches_marker(line, target_marker):
+            seen_markers += 1
             if i + 1 < num_lines and START_MARKER in lines[i + 1]:
+                i += 1
+                continue
+            if skip_first_layer and seen_markers == 1:
                 i += 1
                 continue
             output.append(injected_block)
@@ -941,7 +959,7 @@ def _permission_folder_tree(path: str) -> str:
 class PrusaLapsePlugin(_BasePluginClass):
     id = "prusalapse"
     name = "PrusaLapse"
-    version = "1.3.8"
+    version = "1.3.9"
     description = "Cinematic Multi-Camera Timelapse Controller & G-code Injector"
     author = "Carlos de la Fuente Bustillo"
     page = PrusaLapsePage

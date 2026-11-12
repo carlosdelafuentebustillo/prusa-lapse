@@ -1970,7 +1970,7 @@ export default function Home() {
                   <label style={{ margin: 0 }}>OTA Firmware Update</label>
                   {latestFirmwareInfo && latestFirmwareInfo.available && (
                     <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                      Latest build: <strong style={{ color: 'var(--color-orange)' }}>{latestFirmwareInfo.version}</strong> ({latestFirmwareInfo.sizeFormatted})
+                      Latest build: <strong style={{ color: 'var(--color-orange)' }}>{latestFirmwareInfo.version || 'firmware.bin'}</strong> ({latestFirmwareInfo.sizeFormatted})
                     </span>
                   )}
                 </div>

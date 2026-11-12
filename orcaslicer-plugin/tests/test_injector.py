@@ -64,6 +64,9 @@ class TestGCodeInjector(unittest.TestCase):
             ";AFTER_LAYER_CHANGE\n"
             ";[layer_z]\n"
             "G1 X60 Y60 E2.0\n"
+            ";AFTER_LAYER_CHANGE\n"
+            ";[layer_z]\n"
+            "G1 X70 Y70 E3.0\n"
         )
         config = {
             "parkX": 240.0,
@@ -73,12 +76,21 @@ class TestGCodeInjector(unittest.TestCase):
             "captureTime": 1200,
         }
         modified, count = inject_timelapse_gcode(gcode, config)
+        # First layer marker (layer 0) is skipped; layers 1 and 2 are injected
         self.assertEqual(count, 2)
+        self.assertIn("G1 E-0.7 F2100 ; Retract before parking", modified)
+        self.assertIn("G1 E0.7 F1500 ; Unretract after parking", modified)
+        self.assertIn("M400 ; Wait for park move to complete", modified)
         self.assertIn("M220 S99", modified)
         self.assertIn("G1 X240.0 Y200.0 F9000", modified)
         self.assertIn("M83 ; Strict relative extrusion", modified)
         self.assertIn("G1 F9000 ; Restore normal travel feedrate", modified)
         self.assertIn("M220 S100", modified)
+
+        # Ensure nothing was injected at the very first ;AFTER_LAYER_CHANGE (Layer 0)
+        first_marker_idx = modified.index(";AFTER_LAYER_CHANGE")
+        second_marker_idx = modified.index(";AFTER_LAYER_CHANGE", first_marker_idx + 1)
+        self.assertNotIn("M220 S99", modified[first_marker_idx:second_marker_idx])
 
     def test_layer_change_fallback_marker(self):
         gcode = (
