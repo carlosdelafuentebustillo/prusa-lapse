@@ -74,12 +74,12 @@ async function runTests() {
     // Test 3: Firmware & Webapp Version Consistency Check
     console.log('\n--- TEST 3: Version Bump & Sensor Stability Compliance ---');
     const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
-    assert.strictEqual(pkg.version, '1.3.9', 'webapp/package.json version must be 1.3.9');
+    assert.strictEqual(pkg.version, '1.3.10', 'webapp/package.json version must be 1.3.10');
     console.log(`  ✓ Step 3.1: webapp/package.json version is ${pkg.version}`);
 
     const mainCpp = fs.readFileSync(path.resolve(__dirname, '../../firmware/src/main.cpp'), 'utf8');
     const fwVerMatch = mainCpp.match(/#define\s+FIRMWARE_VERSION\s+"([^"]+)"/);
-    assert.ok(fwVerMatch && fwVerMatch[1] === 'v1.3.3', 'firmware/src/main.cpp FIRMWARE_VERSION must be v1.3.3');
+    assert.ok(fwVerMatch && fwVerMatch[1] === 'v1.3.4', 'firmware/src/main.cpp FIRMWARE_VERSION must be v1.3.4');
     console.log(`  ✓ Step 3.2: firmware/src/main.cpp FIRMWARE_VERSION is ${fwVerMatch[1]}`);
 
     assert.ok(mainCpp.includes('s->set_aec2(s, 0);'), 'DSP AEC2 must be disabled in firmware');

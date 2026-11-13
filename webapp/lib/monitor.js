@@ -55,6 +55,33 @@ export function getConfigFile() {
 }
 
 const CAPTURES_DIR = getCapturesDir();
+const MIN_TIMELAPSE_FRAMES = 21; // Timelapses with 20 frames or fewer are discarded
+
+function readJpegDimensions(buf) {
+  if (!buf || buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
+  let offset = 2;
+  while (offset + 4 < buf.length) {
+    if (buf[offset] !== 0xff) break;
+    while (offset < buf.length && buf[offset] === 0xff) offset++;
+    if (offset >= buf.length) break;
+    const marker = buf[offset];
+    offset++;
+    if (marker === 0xd9 || marker === 0xda) break; // EOI / SOS
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (offset + 2 > buf.length) break;
+    const segLen = buf.readUInt16BE(offset);
+    if (segLen < 2 || offset + segLen > buf.length) break;
+    const isSof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+    if (isSof && segLen >= 7) {
+      const height = buf.readUInt16BE(offset + 3);
+      const width = buf.readUInt16BE(offset + 5);
+      if (width > 0 && height > 0) return { width, height };
+      return null;
+    }
+    offset += segLen;
+  }
+  return null;
+}
 
 const DEFAULT_SLICER_CONFIG = {
   autoInjectOrcaSlicer: true,
@@ -795,6 +822,8 @@ class MonitorService {
     this.log(`Started PC Backup Sync. Monitoring cameras for new frames...`, 'success');
     this.log(`Session directory: ${this.currentSession}`, 'info');
 
+    await this.setCameraPrintLock(config.cameraIps, true);
+
     const sessionDir = path.join(CAPTURES_DIR, this.currentSession);
     await fs.mkdir(sessionDir, { recursive: true });
     await this.syncJobMetadata(sessionDir);
@@ -802,11 +831,87 @@ class MonitorService {
     this.intervalId = setTimeout(() => this.pollCameras(config), 2000);
   }
 
-  stop() {
+  async setCameraPrintLock(cameraIps = [], locked = false) {
+    if (!Array.isArray(cameraIps) || cameraIps.length === 0) return;
+    await Promise.allSettled(
+      cameraIps.map(async (rawIp) => {
+        const ip = (rawIp || '').trim();
+        if (!ip) return;
+        const controller = new AbortController();
+        const tid = setTimeout(() => controller.abort(), 1500);
+        try {
+          await fetch(`http://${ip}/control?var=print_lock&val=${locked ? 1 : 0}`, { signal: controller.signal });
+        } catch (_) {
+        } finally {
+          clearTimeout(tid);
+        }
+      })
+    );
+  }
+
+  async pruneShortCameraFolders(sessionDir, minFrames = MIN_TIMELAPSE_FRAMES) {
+    const kept = [];
+    const discarded = [];
+    let hasVideos = false;
+    try {
+      const dirItems = await fs.readdir(sessionDir, { withFileTypes: true });
+      const videoNames = new Set(
+        dirItems.filter(d => d.isFile() && d.name.endsWith('.mp4')).map(d => d.name)
+      );
+      hasVideos = videoNames.size > 0;
+
+      for (const dItem of dirItems) {
+        if (!dItem.isDirectory() || !dItem.name.startsWith('camera_')) continue;
+        const camDirPath = path.join(sessionDir, dItem.name);
+        let frameCount = 0;
+        try {
+          const files = await fs.readdir(camDirPath);
+          frameCount = files.filter(f => /^frame_\d+\.jpg$/i.test(f)).length;
+        } catch (_) {}
+
+        const hasOwnVideo = videoNames.has(`${dItem.name}.mp4`);
+        if (frameCount < minFrames && !hasOwnVideo) {
+          await fs.rm(camDirPath, { recursive: true, force: true }).catch(() => {});
+          discarded.push({ name: dItem.name, count: frameCount });
+        } else {
+          kept.push({ name: dItem.name, count: frameCount });
+        }
+      }
+
+      if (kept.length === 0 && !hasVideos) {
+        await fs.rm(sessionDir, { recursive: true, force: true }).catch(() => {});
+        return { kept, discarded, sessionDeleted: true, totalKeptFrames: 0 };
+      }
+    } catch (_) {}
+
+    const totalKeptFrames = kept.reduce((sum, c) => sum + c.count, 0);
+    return { kept, discarded, sessionDeleted: false, totalKeptFrames };
+  }
+
+  async stop() {
     if (!this.isRunning) return;
     clearTimeout(this.intervalId);
     this.isRunning = false;
-    this.log(`PC Backup Sync stopped. Synced ${this.frameCount} frames to local PC.`, 'info');
+    const stoppedSession = this.currentSession;
+    const syncedFrames = this.frameCount;
+    this.currentSession = null;
+
+    const config = await this.getConfig().catch(() => null);
+    await this.setCameraPrintLock(config?.cameraIps || [], false);
+
+    if (stoppedSession) {
+      const sessionDir = path.join(CAPTURES_DIR, stoppedSession);
+      const pruneResult = await this.pruneShortCameraFolders(sessionDir);
+      for (const d of pruneResult.discarded) {
+        this.log(`Discarded short camera folder ${d.name} in ${stoppedSession} (${d.count} frames <= 20).`, 'info');
+      }
+      if (pruneResult.sessionDeleted) {
+        this.log(`PC Backup Sync stopped. Discarded short session ${stoppedSession} (all cameras <= 20 frames).`, 'info');
+        return;
+      }
+    }
+
+    this.log(`PC Backup Sync stopped. Synced ${syncedFrames} frames to local PC.`, 'info');
   }
 
   async isTimelapseRecording() {
@@ -1031,6 +1136,10 @@ class MonitorService {
           }
 
           const expFrames = remoteFrameCounts ? remoteFrameCounts[ip] : null;
+          if (targetSessionId && typeof expFrames === 'number' && expFrames < MIN_TIMELAPSE_FRAMES) {
+            this.log(`Camera ${i} (${ip}) session ${targetSessionId} has ${expFrames} frames (<= 20). Discarding short timelapse.`, 'info');
+            return { ip, index: i, folderName, skip: true, shortDiscarded: true, files: [], targetFiles: [] };
+          }
           if (targetSessionId && typeof expFrames === 'number' && expFrames > 0) {
             // Direct deterministic file generation from sessions.jsonl - NO /list_sd required!
             const targetFiles = Array.from({ length: expFrames }, (_, idx) => `${targetSessionId}_f${String(idx).padStart(4, '0')}.jpg`);
@@ -1083,6 +1192,11 @@ class MonitorService {
               if (effectiveSessionId && !file.startsWith(effectiveSessionId + '_')) return false;
               return file.endsWith('.jpg');
             });
+
+            if (targetFiles.length < MIN_TIMELAPSE_FRAMES) {
+              this.log(`Camera ${i} (${ip}) has only ${targetFiles.length} frames (<= 20). Skipping short camera timelapse.`, 'info');
+              return { ip, index: i, folderName, skip: true, shortDiscarded: true, files: [], targetFiles: [] };
+            }
 
             return {
               ip,
@@ -1266,21 +1380,22 @@ class MonitorService {
         await downloadCameraFiles(cam);
       }
 
-      // Step 6: Count actual frames verified on disk across all camera_* folders
-      let totalFramesFetched = 0;
-      try {
-        const dirItems = await fs.readdir(sessionDir, { withFileTypes: true });
-        for (const dItem of dirItems) {
-          if (dItem.isDirectory() && dItem.name.startsWith('camera_')) {
-            try {
-              const files = await fs.readdir(path.join(sessionDir, dItem.name));
-              totalFramesFetched += files.filter(f => f.startsWith('frame_') && f.endsWith('.jpg')).length;
-            } catch {}
-          }
-        }
-      } catch {}
+      await metadataSyncPromise;
 
-      if (totalFramesFetched === 0) {
+      // Step 6: Prune short camera captures (<= 20 frames) per-camera and verify remaining frames
+      const pruneResult = await this.pruneShortCameraFolders(sessionDir);
+      for (const d of pruneResult.discarded) {
+        this.log(`Discarded short camera capture ${d.name} in ${sessionId} (${d.count} frames <= 20).`, 'info');
+      }
+      const totalFramesFetched = pruneResult.totalKeptFrames;
+
+      if (totalFramesFetched === 0 && pruneResult.sessionDeleted) {
+        const allShort = sessionInfo.length > 0 && sessionInfo.every(c => c.shortDiscarded || c.skip || c.empty);
+        this.remoteSessionsCache = this.remoteSessionsCache.filter(s => s.timestamp !== timestamp);
+        if (allShort && errors.length === 0) {
+          this.log(`Offline fetch discarded short timelapse (${sessionId}): 20 frames or fewer per camera.`, 'info');
+          return { success: false, discarded: true, error: 'Short timelapse discarded (20 frames or fewer per camera).' };
+        }
         this.log('Offline fetch aborted. No files were downloaded.', 'warning');
         return { success: false, error: 'No files downloaded. ' + errors.join('. ') };
       }
@@ -1291,7 +1406,6 @@ class MonitorService {
         this.fetchStatus.totalFramesFetched = totalFramesFetched;
       }
 
-      await metadataSyncPromise;
       try {
         await this.syncJobMetadata(sessionDir, jobId, jobName, timestamp);
       } catch {}
@@ -1571,6 +1685,9 @@ class MonitorService {
               if (line) {
                 try {
                   const data = JSON.parse(line);
+                  if (Number(data.frames || 0) < MIN_TIMELAPSE_FRAMES) {
+                    continue; // Per-camera discard policy: ignore short timelapses (<= 20 frames)
+                  }
                   let timestamp = data.timestamp;
                   let targetDate = null;
                       
@@ -2018,13 +2135,44 @@ class MonitorService {
         }
       }
 
-      // 3. Write FFmpeg concat demuxer file so missing frame numbers never truncate the video
+      // 3. Detect mixed frame dimensions so variable SVGA/UXGA captures never produce distorted/failing videos
+      let hasMixedDimensions = false;
+      let targetWidth = 0;
+      let targetHeight = 0;
+      const seenDimensions = new Set();
+      for (const f of validFrames) {
+        try {
+          const fh = await fs.open(path.join(camDir, f), 'r');
+          const probeBuf = Buffer.alloc(65536);
+          const { bytesRead } = await fh.read(probeBuf, 0, probeBuf.length, 0);
+          await fh.close();
+          const dims = readJpegDimensions(probeBuf.subarray(0, bytesRead));
+          if (dims) {
+            seenDimensions.add(`${dims.width}x${dims.height}`);
+            if (dims.width > targetWidth || (dims.width === targetWidth && dims.height > targetHeight)) {
+              targetWidth = dims.width;
+              targetHeight = dims.height;
+            }
+          }
+        } catch {}
+      }
+      if (seenDimensions.size > 1 && targetWidth > 0 && targetHeight > 0) {
+        hasMixedDimensions = true;
+        targetWidth = targetWidth - (targetWidth % 2);
+        targetHeight = targetHeight - (targetHeight % 2);
+        this.log(`Mixed frame dimensions detected in ${folderName} (${Array.from(seenDimensions).join(', ')}); normalizing to ${targetWidth}x${targetHeight}.`, 'info');
+      }
+
+      // 4. Write FFmpeg concat demuxer file so missing frame numbers never truncate the video
       const concatListPath = path.join(camDir, '_ffmpeg_concat.txt');
       const concatLines = validFrames.map(f => `file '${path.join(camDir, f).replace(/\\/g, '/')}'`);
       await fs.writeFile(concatListPath, concatLines.join('\n') + '\n', 'utf-8');
 
-      // 4. Video filter pipeline: rotation + temporal deflickering
+      // 5. Video filter pipeline: resolution normalization (when mixed), rotation, + temporal deflickering
       const filters = [];
+      if (hasMixedDimensions) {
+        filters.push(`scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=decrease,pad=${targetWidth}:${targetHeight}:(ow-iw)/2:(oh-ih)/2,setsar=1`);
+      }
       if (rotation === 90) {
         filters.push('transpose=1');
       } else if (rotation === 270) {
@@ -2033,8 +2181,10 @@ class MonitorService {
         filters.push('hflip', 'vflip');
       }
 
-      if (deflicker && validFrames.length >= 5) {
+      if (deflicker && validFrames.length >= 10) {
         filters.push('deflicker=mode=pm:size=10');
+      } else if (deflicker && validFrames.length > 0 && validFrames.length < 10) {
+        this.log(`Skipping temporal deflicker on ${folderName}: ${validFrames.length} frames < 10 minimum.`, 'info');
       }
 
       const vfArg = filters.length > 0 ? `-vf "${filters.join(',')}" ` : '';
@@ -2046,6 +2196,7 @@ class MonitorService {
           this.isCompiling = false;
           await fs.rm(concatListPath, { force: true }).catch(() => {});
           if (error) {
+            await fs.rm(outputPath, { force: true }).catch(() => {});
             this.log(`FFmpeg failed: ${error.message}`, 'error');
             reject(error);
           } else {

@@ -300,6 +300,7 @@ export default function Home() {
   const [isBackendRecording, setIsBackendRecording] = useState(false);
   const activePrintCamera = Object.values(cameraSettings).find(c => c && (c.printer_state === 'PRINTING' || c.printer_state === 'PAUSED'));
   const isTimelapseRecording = Boolean(isMonitoring || isBackendRecording || activePrintCamera);
+  const isStreamModeLocked = Boolean(isTimelapseRecording || Object.values(cameraSettings).some(c => c && c.print_mode_locked));
   const [printerOfflineWarning, setPrinterOfflineWarning] = useState(false);
   const [configCollapsed, setConfigCollapsed] = useState(true);
   const [showLogs, setShowLogs] = useState(false);
@@ -326,8 +327,12 @@ export default function Home() {
   const [activeStreamingCameraIp, setActiveStreamingCameraIp] = useState(null);
 
   const handleToggleStream = useCallback((cameraIp) => {
+    if (isStreamModeLocked) {
+      addToast('Stream / Snapshot mode is locked for the duration of the active print.', 'warning');
+      return;
+    }
     setActiveStreamingCameraIp(prev => (prev === cameraIp ? null : cameraIp));
-  }, []);
+  }, [isStreamModeLocked]);
 
   const [toasts, setToasts] = useState([]);
   const [confirmModal, setConfirmModal] = useState(null);
@@ -529,12 +534,16 @@ export default function Home() {
     if (!cameraIpsStr) return;
     const ips = cameraIpsStr.split('\n').map(ip => ip.trim()).filter(ip => ip);
     let anyCameraOffline = false;
+    let lockedStreamIp = null;
     for (const ip of ips) {
       try {
         const res = await fetch(`/api/camera/status?ip=${ip}`);
         if (res.ok) {
           const data = await res.json();
           const derivedMac = (data.mac || (data.fingerprint && data.fingerprint.length >= 24 ? data.fingerprint.slice(0, 12) : '')).toUpperCase();
+          if (data.print_mode_locked && data.print_locked_stream) {
+            lockedStreamIp = ip;
+          }
           setCameraSettings(prev => ({
             ...prev,
             [ip]: {
@@ -553,12 +562,18 @@ export default function Home() {
               mac: derivedMac || prev[ip]?.mac || '',
               camera_name: data.camera_name ?? 'PrusaLapse Camera',
               firmware_version: data.firmware_version ?? prev[ip]?.firmware_version,
+              stream_active: data.stream_active ?? prev[ip]?.stream_active ?? 0,
+              print_mode_locked: data.print_mode_locked ?? prev[ip]?.print_mode_locked ?? 0,
+              print_locked_stream: data.print_locked_stream ?? prev[ip]?.print_locked_stream ?? 0,
             }
           }));
         }
         const statusRes = await fetch(`/api/camera/camera_status?ip=${ip}`);
         if (statusRes.ok) {
           const statusData = await statusRes.json();
+          if (statusData.print_mode_locked && statusData.print_locked_stream) {
+            lockedStreamIp = ip;
+          }
           setCameraSettings(prev => ({
             ...prev,
             [ip]: {
@@ -573,6 +588,9 @@ export default function Home() {
       } catch (e) {
         console.error(`Failed to fetch camera settings for ${ip}`, e);
       }
+    }
+    if (lockedStreamIp) {
+      setActiveStreamingCameraIp(lockedStreamIp);
     }
     setPrinterOfflineWarning(anyCameraOffline);
   };
@@ -1678,6 +1696,7 @@ export default function Home() {
                 addToast={addToast}
                 isStreaming={activeStreamingCameraIp === ip.trim()}
                 onToggleStream={() => handleToggleStream(ip.trim())}
+                isStreamModeLocked={isStreamModeLocked}
               />
             ))}
             {(!config.cameraIps || config.cameraIps.trim() === '') && (

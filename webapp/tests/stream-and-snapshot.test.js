@@ -232,24 +232,24 @@ function runTests() {
   // =========================================================================
   console.log('--- SUITE 5: Repository Version Consistency & Cross-Component Contracts ---');
 
-  // 1. Webapp package.json version check (1.3.9)
+  // 1. Webapp package.json version check (1.3.10)
   const pkgPath = path.join(__dirname, '../package.json');
   assert.ok(fs.existsSync(pkgPath), 'webapp/package.json must exist');
   const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
   assert.strictEqual(
     pkg.version,
-    '1.3.9',
-    `webapp/package.json version must be 1.3.9 (found: ${pkg.version})`
+    '1.3.10',
+    `webapp/package.json version must be 1.3.10 (found: ${pkg.version})`
   );
-  console.log('  ✓ Step 5.1: Webapp package.json version is 1.3.9');
+  console.log('  ✓ Step 5.1: Webapp package.json version is 1.3.10');
 
-  // 2. Firmware version check (v1.3.3)
+  // 2. Firmware version check (v1.3.4)
   const firmwareVersionMatch = mainCppSrc.match(/#define\s+FIRMWARE_VERSION\s+"([^"]+)"/);
   assert.ok(firmwareVersionMatch, 'Firmware must define FIRMWARE_VERSION macro');
   assert.strictEqual(
     firmwareVersionMatch[1],
-    'v1.3.3',
-    `firmware/src/main.cpp FIRMWARE_VERSION must be "v1.3.3" (found: "${firmwareVersionMatch[1]}")`
+    'v1.3.4',
+    `firmware/src/main.cpp FIRMWARE_VERSION must be "v1.3.4" (found: "${firmwareVersionMatch[1]}")`
   );
 
   const majorMatch = mainCppSrc.match(/#define\s+VERSION_MAJOR\s+(\d+)/);
@@ -257,7 +257,7 @@ function runTests() {
   assert.ok(majorMatch && minorMatch, 'Firmware must define VERSION_MAJOR and VERSION_MINOR');
   assert.strictEqual(majorMatch[1], '1', 'VERSION_MAJOR must be 1');
   assert.strictEqual(minorMatch[1], '3', 'VERSION_MINOR must be 3');
-  console.log('  ✓ Step 5.2: Firmware version is v1.3.3 (Major 1, Minor 3)');
+  console.log('  ✓ Step 5.2: Firmware version is v1.3.4 (Major 1, Minor 3)');
 
   console.log('✓ SUITE 5 PASSED: Version consistency verified across all components.\n');
 

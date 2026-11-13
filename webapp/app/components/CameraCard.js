@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 function SnapshotImage({ ip, idx }) {
   const [snapshotUrl, setSnapshotUrl] = useState(`http://${ip}/snapshot.jpg?t=${Date.now()}`);
@@ -70,17 +70,24 @@ export default function CameraCard({
   config,
   addToast,
   isStreaming = false,
-  onToggleStream
+  onToggleStream,
+  isStreamModeLocked = false
 }) {
   const [showSettings, setShowSettings] = useState(false);
   const [cameraNameInput, setCameraNameInput] = useState(getCameraVal(cleanIp, 'camera_name', `Camera ${idx + 1}`));
   const [connectTokenInput, setConnectTokenInput] = useState('');
+  const [streamRetryNonce, setStreamRetryNonce] = useState(0);
+  const isStreamModeLockedRef = useRef(isStreamModeLocked);
+
+  useEffect(() => {
+    isStreamModeLockedRef.current = isStreamModeLocked;
+  }, [isStreamModeLocked]);
 
   useEffect(() => {
     if (!isStreaming) return;
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
-        if (onToggleStream) onToggleStream();
+        if (!isStreamModeLockedRef.current && onToggleStream) onToggleStream();
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -151,10 +158,11 @@ export default function CameraCard({
             type="button"
             className={`btn btn-small ${isStreaming ? 'btn-primary' : 'btn-ghost'}`}
             onClick={onToggleStream}
-            style={{ width: 'auto', padding: '3px 8px', fontSize: '0.72rem' }}
-            title={isStreaming ? 'Switch to Snapshot Mode' : 'Switch to Live Video Stream'}
+            disabled={isStreamModeLocked}
+            style={{ width: 'auto', padding: '3px 8px', fontSize: '0.72rem', opacity: isStreamModeLocked ? 0.65 : 1 }}
+            title={isStreamModeLocked ? 'Mode locked while print is active' : (isStreaming ? 'Switch to Snapshot Mode' : 'Switch to Live Video Stream')}
           >
-            {isStreaming ? '📹 Live Stream' : '📷 Snapshot'}
+            {isStreaming ? '📹 Live Stream' : '📷 Snapshot'}{isStreamModeLocked ? ' 🔒' : ''}
           </button>
           <button
             type="button"
@@ -209,12 +217,17 @@ export default function CameraCard({
         {isStreaming ? (
           <div style={{ position: 'relative', width: '100%', height: '100%' }}>
             <img
-              src={`http://${cleanIp}/stream`}
+              key={streamRetryNonce}
+              src={`http://${cleanIp}/stream${streamRetryNonce > 0 ? `?r=${streamRetryNonce}` : ''}`}
               alt={`Live Stream Camera ${idx + 1}`}
               style={{ width: '100%', height: 'auto', display: 'block' }}
               onError={() => {
                 if (addToast) addToast(`Live stream disconnected for Camera ${idx + 1}`, 'error');
-                if (onToggleStream) onToggleStream();
+                if (isStreamModeLockedRef.current) {
+                  setTimeout(() => setStreamRetryNonce(n => n + 1), 1500);
+                } else if (onToggleStream) {
+                  onToggleStream();
+                }
               }}
             />
             <div style={{

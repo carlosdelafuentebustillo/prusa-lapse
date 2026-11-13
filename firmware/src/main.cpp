@@ -13,6 +13,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <Update.h>
+#include <vector>
 
 String prusaIp = "";
 String prusaApiKey = "";
@@ -22,8 +23,8 @@ int last_prusa_connect_code = 0;
 String cameraName = "PrusaLapse Camera";
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 3
-#define FIRMWARE_VERSION "v1.3.3"
-
+#define FIRMWARE_VERSION "v1.3.4"
+#define MIN_TIMELAPSE_FRAMES 21
 String deviceMacHex = "";
 String getDeviceMacHex() {
   if (deviceMacHex.length() == 12) return deviceMacHex;
@@ -56,25 +57,61 @@ TaskHandle_t heartbeatTaskHandle = NULL;
 TaskHandle_t captureTaskHandle = NULL;
 TaskHandle_t prusaLinkTaskHandle = NULL;
 
-void saveConfigToSD() {
-  if (sdCardAvailable) {
-    File file = SD_MMC.open("/config.txt", FILE_WRITE);
-    if (file) {
-      file.printf("PRUSA_IP=%s\n", prusaIp.c_str());
-      file.printf("PRUSA_API_KEY=%s\n", prusaApiKey.c_str());
-      file.printf("PRUSA_CONNECT_TOKEN=%s\n", prusaConnectToken.c_str());
-      file.printf("OFFLINE_MODE=%d\n", offlineMode ? 1 : 0);
-      file.printf("CAMERA_NAME=%s\n", cameraName.c_str());
-      file.printf("BRIGHTNESS=%d\n", brightnessVal);
-      file.printf("CONTRAST=%d\n", contrastVal);
-      file.printf("HMIRROR=%d\n", hmirrorVal);
-      file.printf("VFLIP=%d\n", vflipVal);
-      file.printf("LED_STATE=%d\n", led_state);
-      if (WiFi.SSID() != "") file.printf("WIFI_SSID=%s\n", WiFi.SSID().c_str());
-      file.close();
-      Serial.println("Saved config to SD config.txt");
-    }
+SemaphoreHandle_t camera_mutex = NULL;
+SemaphoreHandle_t snapshot_mutex = NULL;
+SemaphoreHandle_t sd_mutex = NULL;
+SemaphoreHandle_t state_mutex = NULL;
+SemaphoreHandle_t sd_write_semaphore = NULL;
+bool sd_write_in_progress = false;
+int consecutiveCaptureFailures = 0;
+
+inline String readStringLocked(const String &src) {
+  String copy;
+  if (state_mutex && xSemaphoreTake(state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    copy = src;
+    xSemaphoreGive(state_mutex);
+  } else {
+    copy = src;
   }
+  return copy;
+}
+
+inline void writeStringLocked(String &dst, const String &val) {
+  if (state_mutex && xSemaphoreTake(state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    dst = val;
+    xSemaphoreGive(state_mutex);
+  } else {
+    dst = val;
+  }
+}
+
+void saveConfigToSD() {
+  if (!sdCardAvailable) return;
+  if (sd_mutex && xSemaphoreTake(sd_mutex, pdMS_TO_TICKS(1500)) != pdTRUE) {
+    Serial.println("saveConfigToSD: SD mutex busy, skipping config write");
+    return;
+  }
+  String ip = readStringLocked(prusaIp);
+  String key = readStringLocked(prusaApiKey);
+  String tok = readStringLocked(prusaConnectToken);
+  String cname = readStringLocked(cameraName);
+  File file = SD_MMC.open("/config.txt", FILE_WRITE);
+  if (file) {
+    file.printf("PRUSA_IP=%s\n", ip.c_str());
+    file.printf("PRUSA_API_KEY=%s\n", key.c_str());
+    file.printf("PRUSA_CONNECT_TOKEN=%s\n", tok.c_str());
+    file.printf("OFFLINE_MODE=%d\n", offlineMode ? 1 : 0);
+    file.printf("CAMERA_NAME=%s\n", cname.c_str());
+    file.printf("BRIGHTNESS=%d\n", brightnessVal);
+    file.printf("CONTRAST=%d\n", contrastVal);
+    file.printf("HMIRROR=%d\n", hmirrorVal);
+    file.printf("VFLIP=%d\n", vflipVal);
+    file.printf("LED_STATE=%d\n", led_state);
+    if (WiFi.SSID() != "") file.printf("WIFI_SSID=%s\n", WiFi.SSID().c_str());
+    file.close();
+    Serial.println("Saved config to SD config.txt");
+  }
+  if (sd_mutex) xSemaphoreGive(sd_mutex);
 }
 
 void syncConfig() {
@@ -296,13 +333,6 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 )rawliteral";
 
-SemaphoreHandle_t camera_mutex = NULL;
-SemaphoreHandle_t snapshot_mutex = NULL;
-SemaphoreHandle_t sd_mutex = NULL;
-SemaphoreHandle_t sd_write_semaphore = NULL;
-bool sd_write_in_progress = false;
-int consecutiveCaptureFailures = 0;
-
 void setupCamera();
 
 // ==========================================
@@ -342,10 +372,36 @@ public:
   }
 };
 
-// Stream synchronization primitives
+// Stream & print mode lock synchronization primitives
 volatile bool stream_active = false;
 volatile bool stream_pause_requested = false;
 volatile uint32_t stream_client_id = 0;
+volatile bool print_mode_locked = false;
+volatile bool print_locked_stream = false;
+volatile bool manual_print_lock = false;
+volatile framesize_t desired_sensor_framesize = FRAMESIZE_UXGA;
+volatile int desired_sensor_quality = 10;
+volatile bool sensor_framesize_dirty = false;
+
+void applyDesiredSensorFrameSize(sensor_t *s, framesize_t targetSize, int targetQuality, bool flushFrames = true) {
+  if (!s) return;
+  bool changed = (s->status.framesize != targetSize);
+  if (changed) {
+    s->set_framesize(s, targetSize);
+  }
+  if (targetQuality > 0 && (changed || s->status.quality != targetQuality)) {
+    s->set_quality(s, targetQuality);
+  }
+  if (changed) {
+    vTaskDelay(pdMS_TO_TICKS(120));
+    if (flushFrames) {
+      for (int i = 0; i < 2; i++) {
+        camera_fb_t *flush_fb = esp_camera_fb_get();
+        if (flush_fb) esp_camera_fb_return(flush_fb);
+      }
+    }
+  }
+}
 
 #define STREAM_BOUNDARY "frame"
 static const char* STREAM_CONTENT_TYPE = "multipart/x-mixed-replace; boundary=" STREAM_BOUNDARY;
@@ -385,18 +441,10 @@ public:
     }
     if (_thisClientId == stream_client_id) {
       stream_active = false;
-      if (camera_mutex && xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        sensor_t *s = esp_camera_sensor_get();
-        if (s && psramFound() && s->status.framesize != FRAMESIZE_UXGA) {
-          s->set_framesize(s, FRAMESIZE_UXGA);
-          s->set_quality(s, 10);
-          vTaskDelay(pdMS_TO_TICKS(100));
-          for (int i = 0; i < 2; i++) {
-            camera_fb_t *flush_fb = esp_camera_fb_get();
-            if (flush_fb) esp_camera_fb_return(flush_fb);
-          }
-        }
-        xSemaphoreGive(camera_mutex);
+      if (!(print_mode_locked && print_locked_stream)) {
+        desired_sensor_framesize = psramFound() ? FRAMESIZE_UXGA : FRAMESIZE_VGA;
+        desired_sensor_quality = 10;
+        sensor_framesize_dirty = true;
       }
     }
   }
@@ -459,6 +507,14 @@ public:
     // Acquire camera_mutex with 150ms timeout
     if (!camera_mutex || xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(150)) != pdTRUE) {
       return RESPONSE_TRY_AGAIN;
+    }
+
+    if (sensor_framesize_dirty) {
+      sensor_t *s = esp_camera_sensor_get();
+      if (s) {
+        applyDesiredSensorFrameSize(s, desired_sensor_framesize, desired_sensor_quality, true);
+      }
+      sensor_framesize_dirty = false;
     }
 
     camera_fb_t *fb = esp_camera_fb_get();
@@ -550,10 +606,13 @@ void captureTask(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(180)); // let auto-exposure adjust to the light
       }
       
-      // Ensure UXGA without triggering an unnecessary sensor mode reset if already at UXGA (only if stream idle)
-      if (!stream_active && s && psramFound() && s->status.framesize != FRAMESIZE_UXGA) {
-        s->set_framesize(s, FRAMESIZE_UXGA);
-        vTaskDelay(pdMS_TO_TICKS(250));
+      // Ensure locked session resolution (SVGA when locked to stream, otherwise UXGA) without unnecessary resets
+      bool useSvga = stream_active || (print_mode_locked && print_locked_stream);
+      framesize_t targetSize = useSvga ? FRAMESIZE_SVGA : (psramFound() ? FRAMESIZE_UXGA : FRAMESIZE_VGA);
+      int targetQuality = useSvga ? 12 : 10;
+      if (s && (s->status.framesize != targetSize || sensor_framesize_dirty)) {
+        applyDesiredSensorFrameSize(s, targetSize, targetQuality, false);
+        sensor_framesize_dirty = false;
       }
       
       // Flush stale frames from hardware DMA buffers (fb_count=2)
@@ -568,7 +627,7 @@ void captureTask(void *pvParameters) {
 
       // Guard against momentary underexposed or overexposed exposure anomalies:
       // Crushed dark frames compress to <42KB (or <68% of rolling avg), blowout frames surge >140% of rolling avg
-      bool isExposureAnomaly = (!stream_active) && fb && (
+      bool isExposureAnomaly = (!useSvga) && fb && (
         fb->len < 42000 || 
         (rollingAvgLen > 60000 && (fb->len < (rollingAvgLen * 68) / 100 || fb->len > (rollingAvgLen * 140) / 100))
       );
@@ -590,7 +649,7 @@ void captureTask(void *pvParameters) {
         digitalWrite(4, LOW);
       }
       
-      if (!fb || fb->len < (stream_active ? 5000 : 15000)) {
+      if (!fb || fb->len < (useSvga ? 5000 : 15000)) {
         Serial.println("HQ Capture failed or image too small");
         if (fb) esp_camera_fb_return(fb);
         consecutiveCaptureFailures++;
@@ -612,7 +671,7 @@ void captureTask(void *pvParameters) {
       }
       consecutiveCaptureFailures = 0;
 
-      if (!stream_active && fb->len >= 45000) {
+      if (!useSvga && fb->len >= 45000) {
         if (rollingAvgLen == 0) {
           rollingAvgLen = fb->len;
         } else {
@@ -636,7 +695,7 @@ void captureTask(void *pvParameters) {
       if (captured_photo_buf) {
         memcpy(captured_photo_buf, fb->buf, fb->len);
         captured_photo_len = fb->len;
-        Serial.printf("HQ Capture: %d bytes (%s, avg=%u)\n", fb->len, stream_active ? "SVGA" : "UXGA", (unsigned int)rollingAvgLen);
+        Serial.printf("HQ Capture: %d bytes (%s, avg=%u)\n", fb->len, useSvga ? "SVGA" : "UXGA", (unsigned int)rollingAvgLen);
       }
       
       // Synchronize parked frame into snapshot_buf so /snapshot.jpg and Prusa Connect have immediate zero-blur photo
@@ -701,12 +760,13 @@ void takePreviewSnapshot() {
     }
     if (led_state == 2) digitalWrite(4, HIGH); // Auto Flash on inside mutex
 
-    // Do NOT switch resolution between VGA and UXGA when PSRAM is available:
-    // switching framesize resets OV2640 AEC/AGC/AWB registers and causes dark green frames!
-    framesize_t targetSize = psramFound() ? FRAMESIZE_UXGA : FRAMESIZE_VGA;
-    if (s && s->status.framesize != targetSize) {
-      s->set_framesize(s, targetSize);
-      vTaskDelay(pdMS_TO_TICKS(200));
+    // Preserve locked SVGA mode during print-locked stream; otherwise use UXGA (or VGA without PSRAM)
+    bool lockSvga = (print_mode_locked && print_locked_stream);
+    framesize_t targetSize = lockSvga ? FRAMESIZE_SVGA : (psramFound() ? FRAMESIZE_UXGA : FRAMESIZE_VGA);
+    int targetQuality = lockSvga ? 12 : 10;
+    if (s && (s->status.framesize != targetSize || sensor_framesize_dirty)) {
+      applyDesiredSensorFrameSize(s, targetSize, targetQuality, false);
+      sensor_framesize_dirty = false;
     }
     
     if (led_state == 2) vTaskDelay(pdMS_TO_TICKS(150)); // let auto-exposure adjust
@@ -767,16 +827,30 @@ void previewAndUploadTask(void *pvParameters) {
 
     // Only take a sensor preview snapshot when idle and NOT streaming (during active prints, snapshot_buf has parked frames)
     if (currentPrinterState != "PRINTING" && !stream_active) {
-      takePreviewSnapshot();
+      if (!(print_mode_locked && print_locked_stream)) {
+        takePreviewSnapshot();
+      }
     }
 
-    bool wantPrusaConnect = (WiFi.status() == WL_CONNECTED && prusaConnectToken.length() > 0 && prusaConnectFingerprint.length() > 0);
-    if (!wantPrusaConnect) {
+    String connectTokenCopy = readStringLocked(prusaConnectToken);
+    String connectFpCopy = readStringLocked(prusaConnectFingerprint);
+    String camNameCopy = readStringLocked(cameraName);
+    String stateCopy = readStringLocked(currentPrinterState);
+
+    bool wantPrusaConnect = (WiFi.status() == WL_CONNECTED && connectTokenCopy.length() > 0 && connectFpCopy.length() > 0);
+    if (!wantPrusaConnect || stream_active) {
       continue;
     }
 
     if (backoffCycles > 0) {
       backoffCycles--;
+      continue;
+    }
+
+    // Avoid TLS handshake memory spikes (~42KB DRAM) when Core 0 heap is fragmented/tight
+    if (ESP.getFreeHeap() < 54000 || ESP.getMaxAllocHeap() < 38000) {
+      Serial.printf("Prusa Connect: Deferring HTTPS (free=%u, maxAlloc=%u)\n",
+                    (unsigned int)ESP.getFreeHeap(), (unsigned int)ESP.getMaxAllocHeap());
       continue;
     }
 
@@ -786,16 +860,16 @@ void previewAndUploadTask(void *pvParameters) {
       infoClient.setInsecure();
       infoClient.setTimeout(3);
       if (infoClient.connect("camera-service.prusa3d.com", 443, 3000)) {
-        String triggerScheme = (currentPrinterState == "PRINTING") ? "THIRTY_SEC" : "TEN_SEC";
-        String jsonPayload = "{\"config\":{\"name\":\"" + cameraName + "\",\"trigger_scheme\":\"" + triggerScheme + "\"},\"device\":{\"type\":\"ESP32\",\"firmware_version\":\"" + String(FIRMWARE_VERSION) + "\",\"hardware_version\":\"ESP32-CAM\"}}";
+        String triggerScheme = (stateCopy == "PRINTING") ? "THIRTY_SEC" : "TEN_SEC";
+        String jsonPayload = "{\"config\":{\"name\":\"" + camNameCopy + "\",\"trigger_scheme\":\"" + triggerScheme + "\"},\"device\":{\"type\":\"ESP32\",\"firmware_version\":\"" + String(FIRMWARE_VERSION) + "\",\"hardware_version\":\"ESP32-CAM\"}}";
         
         infoClient.println("PUT /v1/camera-info HTTP/1.1");
         infoClient.println("Host: camera-service.prusa3d.com");
         infoClient.println("User-Agent: ESP32-CAM-PrusaLapse/" + String(FIRMWARE_VERSION));
         infoClient.println("Connection: close");
         infoClient.println("Content-Type: application/json");
-        infoClient.println("Fingerprint: " + prusaConnectFingerprint);
-        infoClient.println("Token: " + prusaConnectToken);
+        infoClient.println("Fingerprint: " + connectFpCopy);
+        infoClient.println("Token: " + connectTokenCopy);
         infoClient.println("Content-Length: " + String(jsonPayload.length()));
         infoClient.println();
         infoClient.print(jsonPayload);
@@ -820,7 +894,7 @@ void previewAndUploadTask(void *pvParameters) {
               } else {
                 prusaConnectFailures++;
                 if (prusaConnectFailures >= 2) {
-                  backoffCycles = (currentPrinterState == "PRINTING") ? 4 : 12; // 2 minutes backoff
+                  backoffCycles = (stateCopy == "PRINTING") ? 4 : 12; // 2 minutes backoff
                   prusaConnectFailures = 0;
                   Serial.printf("Prusa Connect: Info payload failed with code %d. Backing off for 2 minutes (%d cycles)...\n", code, backoffCycles);
                 }
@@ -837,7 +911,7 @@ void previewAndUploadTask(void *pvParameters) {
         last_prusa_connect_code = -1;
         prusaConnectFailures++;
         if (prusaConnectFailures >= 2) {
-          backoffCycles = (currentPrinterState == "PRINTING") ? 4 : 12; // 2 minutes backoff
+          backoffCycles = (stateCopy == "PRINTING") ? 4 : 12; // 2 minutes backoff
           prusaConnectFailures = 0;
           Serial.printf("Prusa Connect: Info client unreachable. Backing off for 2 minutes (%d cycles)...\n", backoffCycles);
         }
@@ -847,7 +921,7 @@ void previewAndUploadTask(void *pvParameters) {
     }
 
     // --- 3. Upload the preview buffer to Prusa Connect ---
-    if (WiFi.status() == WL_CONNECTED && prusaConnectToken.length() > 0 && prusaConnectFingerprint.length() > 0) {
+    if (WiFi.status() == WL_CONNECTED && connectTokenCopy.length() > 0 && connectFpCopy.length() > 0) {
       uint8_t *upload_buf = NULL;
       size_t upload_len = 0;
       
@@ -877,8 +951,8 @@ void previewAndUploadTask(void *pvParameters) {
           client.println("User-Agent: ESP32-CAM-PrusaLapse/" + String(FIRMWARE_VERSION));
           client.println("Connection: close");
           client.println("Content-Type: image/jpeg");
-          client.println("Fingerprint: " + prusaConnectFingerprint);
-          client.println("Token: " + prusaConnectToken);
+          client.println("Fingerprint: " + connectFpCopy);
+          client.println("Token: " + connectTokenCopy);
           client.println("Content-Length: " + String(upload_len));
           client.println();
 
@@ -911,7 +985,7 @@ void previewAndUploadTask(void *pvParameters) {
                 } else {
                   prusaConnectFailures++;
                   if (prusaConnectFailures >= 2) {
-                    backoffCycles = (currentPrinterState == "PRINTING") ? 4 : 12; // 2 minutes backoff
+                    backoffCycles = (stateCopy == "PRINTING") ? 4 : 12; // 2 minutes backoff
                     prusaConnectFailures = 0;
                     Serial.printf("Prusa Connect: HTTP %d. Backing off for 2 minutes (%d cycles)...\n", httpCode, backoffCycles);
                   }
@@ -930,7 +1004,7 @@ void previewAndUploadTask(void *pvParameters) {
           last_prusa_connect_code = -1;
           prusaConnectFailures++;
           if (prusaConnectFailures >= 2) {
-            backoffCycles = (currentPrinterState == "PRINTING") ? 4 : 12; // 2 minutes backoff
+            backoffCycles = (stateCopy == "PRINTING") ? 4 : 12; // 2 minutes backoff
             prusaConnectFailures = 0;
             Serial.printf("Prusa Connect: Cloud unreachable. Backing off for 2 minutes (%d cycles)...\n", backoffCycles);
           }
@@ -1029,10 +1103,36 @@ void setupCamera() {
 
 
 // ==========================================
-// BACKGROUND TAR PACKING TASK
-// Packs a finished session's JPGs into a single .tar file
-// Uses heap/PSRAM buffers and sd_mutex to prevent stack overflow and FATFS corruption
+// BACKGROUND TAR PACKING & CLEANUP TASKS
+// Packs a finished session's JPGs into a single .tar file incrementally, releasing sd_mutex between files
+// Uses heap/PSRAM buffers and sd_mutex to prevent stack overflow and FATFS contention
 // ==========================================
+void cleanupTempTarFiles() {
+  if (!sdCardAvailable) return;
+  if (sd_mutex && xSemaphoreTake(sd_mutex, pdMS_TO_TICKS(3000)) != pdTRUE) return;
+  File dir = SD_MMC.open("/lapse");
+  if (dir) {
+    std::vector<String> tmpFiles;
+    bool isDir = false;
+    String filepath = dir.getNextFileName(&isDir);
+    while (filepath.length() > 0) {
+      int lastSlash = filepath.lastIndexOf('/');
+      String filename = (lastSlash != -1) ? filepath.substring(lastSlash + 1) : filepath;
+      if (!isDir && filename.endsWith(".tar.tmp")) {
+        tmpFiles.push_back("/lapse/" + filename);
+      }
+      filepath = dir.getNextFileName(&isDir);
+    }
+    dir.close();
+    for (const String &tmpPath : tmpFiles) {
+      if (SD_MMC.remove(tmpPath.c_str())) {
+        Serial.printf("Boot Cleanup: Removed stale temp archive %s\n", tmpPath.c_str());
+      }
+    }
+  }
+  if (sd_mutex) xSemaphoreGive(sd_mutex);
+}
+
 void packTarTask(void *pvParameters) {
   int sId = (intptr_t)pvParameters;
   char sessionIdStr[16];
@@ -1055,96 +1155,169 @@ void packTarTask(void *pvParameters) {
     return;
   }
 
+  std::vector<String> filesToPack;
   if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
 
-  File tarFile = SD_MMC.open(tarTmpPath.c_str(), FILE_WRITE);
-  if (!tarFile) {
-    if (sd_mutex) xSemaphoreGive(sd_mutex);
-    free(header); free(buf); free(empty);
-    Serial.println("Background Task: Failed to create TAR file");
-    vTaskDelete(NULL);
-    return;
+  if (SD_MMC.exists(tarTmpPath.c_str())) {
+    SD_MMC.remove(tarTmpPath.c_str());
   }
-  
+
   File dir = SD_MMC.open("/lapse");
   if (!dir) {
-    tarFile.close();
     if (sd_mutex) xSemaphoreGive(sd_mutex);
     free(header); free(buf); free(empty);
+    Serial.println("Background Task: Failed to open /lapse for TAR scan");
     vTaskDelete(NULL);
     return;
   }
-  
+
   bool isDir = false;
   String nextPath = dir.getNextFileName(&isDir);
   while (nextPath.length() > 0) {
     String filename = nextPath;
     int lastSlash = filename.lastIndexOf('/');
     if (lastSlash != -1) filename = filename.substring(lastSlash + 1);
-
     if (!isDir && filename.startsWith(prefix) && filename.endsWith(".jpg")) {
-      String fullFilePath = String("/lapse/") + filename;
-      File file = SD_MMC.open(fullFilePath.c_str(), FILE_READ);
-      if (file) {
-        memset(header, 0, 512);
-        strncpy((char*)header, filename.c_str(), 99);
-        strcpy((char*)header + 100, "0000644");
-        strcpy((char*)header + 108, "0000000");
-        strcpy((char*)header + 116, "0000000");
-        
-        size_t filesize = file.size();
-        snprintf((char*)header + 124, 12, "%011o", (unsigned int)filesize);
-        strcpy((char*)header + 136, "00000000000");
-        header[156] = '0';
-        
-        strcpy((char*)header + 257, "ustar");
-        header[262] = ' ';
-        strcpy((char*)header + 263, " ");
-        
-        memset((char*)header + 148, ' ', 8);
-        unsigned int checksum = 0;
-        for (int i = 0; i < 512; i++) checksum += header[i];
-        snprintf((char*)header + 148, 8, "%06o", checksum);
-        
-        tarFile.write(header, 512);
-        
-        size_t remaining = filesize;
-        while (remaining > 0) {
-          size_t toRead = remaining > 4096 ? 4096 : remaining;
-          size_t bytesRead = file.read(buf, toRead);
-          if (bytesRead == 0) break;
-          tarFile.write(buf, bytesRead);
-          remaining -= bytesRead;
-          vTaskDelay(pdMS_TO_TICKS(1)); // feed watchdog
-        }
-        file.close();
-
-        // TAR format requires padding to 512-byte block boundary at end of each file
-        size_t pad = (512 - (filesize % 512)) % 512;
-        if (pad > 0) {
-          memset(buf, 0, pad);
-          tarFile.write(buf, pad);
-        }
-      }
+      filesToPack.push_back(filename);
     }
     nextPath = dir.getNextFileName(&isDir);
-    vTaskDelay(pdMS_TO_TICKS(1));
   }
   dir.close();
-  
-  memset(empty, 0, 1024);
-  tarFile.write(empty, 1024);
-  tarFile.close();
-  
-  if (SD_MMC.exists(tarPath.c_str())) {
-    SD_MMC.remove(tarPath.c_str());
-  }
-  SD_MMC.rename(tarTmpPath.c_str(), tarPath.c_str());
 
+  if (filesToPack.empty()) {
+    if (sd_mutex) xSemaphoreGive(sd_mutex);
+    free(header); free(buf); free(empty);
+    Serial.printf("Background Task: No JPG frames found for %s\n", sessionIdStr);
+    vTaskDelete(NULL);
+    return;
+  }
+
+  File tarInit = SD_MMC.open(tarTmpPath.c_str(), FILE_WRITE);
+  if (!tarInit) {
+    if (sd_mutex) xSemaphoreGive(sd_mutex);
+    free(header); free(buf); free(empty);
+    Serial.println("Background Task: Failed to create TAR temp file");
+    vTaskDelete(NULL);
+    return;
+  }
+  tarInit.close();
   if (sd_mutex) xSemaphoreGive(sd_mutex);
+
+  bool packFailed = false;
+  for (size_t idx = 0; idx < filesToPack.size(); idx++) {
+    uint32_t waitMs = 0;
+    while ((capture_in_progress || sd_write_in_progress) && waitMs < 1500) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      waitMs += 50;
+    }
+
+    const String &filename = filesToPack[idx];
+    String fullFilePath = String("/lapse/") + filename;
+
+    if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
+    File file = SD_MMC.open(fullFilePath.c_str(), FILE_READ);
+    File tarFile = SD_MMC.open(tarTmpPath.c_str(), FILE_APPEND);
+
+    if (!file || !tarFile) {
+      if (file) file.close();
+      if (tarFile) tarFile.close();
+      if (sd_mutex) xSemaphoreGive(sd_mutex);
+      packFailed = true;
+      Serial.printf("Background Task: Error opening %s or %s during TAR pack\n", fullFilePath.c_str(), tarTmpPath.c_str());
+      break;
+    }
+
+    memset(header, 0, 512);
+    strncpy((char*)header, filename.c_str(), 99);
+    strcpy((char*)header + 100, "0000644");
+    strcpy((char*)header + 108, "0000000");
+    strcpy((char*)header + 116, "0000000");
+    
+    size_t filesize = file.size();
+    snprintf((char*)header + 124, 12, "%011o", (unsigned int)filesize);
+    strcpy((char*)header + 136, "00000000000");
+    header[156] = '0';
+    
+    strcpy((char*)header + 257, "ustar");
+    header[262] = ' ';
+    strcpy((char*)header + 263, " ");
+    
+    memset((char*)header + 148, ' ', 8);
+    unsigned int checksum = 0;
+    for (int i = 0; i < 512; i++) checksum += header[i];
+    snprintf((char*)header + 148, 8, "%06o", checksum);
+    
+    if (tarFile.write(header, 512) != 512) {
+      packFailed = true;
+    }
+    
+    size_t remaining = filesize;
+    while (!packFailed && remaining > 0) {
+      size_t toRead = remaining > 4096 ? 4096 : remaining;
+      size_t bytesRead = file.read(buf, toRead);
+      if (bytesRead == 0) {
+        packFailed = true;
+        break;
+      }
+      if (tarFile.write(buf, bytesRead) != bytesRead) {
+        packFailed = true;
+        break;
+      }
+      remaining -= bytesRead;
+      vTaskDelay(pdMS_TO_TICKS(1)); // feed watchdog
+    }
+
+    // TAR format requires padding to 512-byte block boundary at end of each file
+    size_t pad = (512 - (filesize % 512)) % 512;
+    if (!packFailed && pad > 0) {
+      memset(buf, 0, pad);
+      if (tarFile.write(buf, pad) != pad) {
+        packFailed = true;
+      }
+    }
+
+    file.close();
+    tarFile.close();
+    if (sd_mutex) xSemaphoreGive(sd_mutex);
+
+    if (packFailed) break;
+    vTaskDelay(pdMS_TO_TICKS(10)); // allow prusaLinkTask / sdWriteTask / /list_sd to acquire sd_mutex promptly
+  }
+
+  if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
+  if (!packFailed) {
+    File tarEnd = SD_MMC.open(tarTmpPath.c_str(), FILE_APPEND);
+    if (tarEnd) {
+      memset(empty, 0, 1024);
+      if (tarEnd.write(empty, 1024) != 1024) {
+        packFailed = true;
+      }
+      tarEnd.close();
+    } else {
+      packFailed = true;
+    }
+  }
+
+  if (!packFailed) {
+    if (SD_MMC.exists(tarPath.c_str())) {
+      SD_MMC.remove(tarPath.c_str());
+    }
+    if (!SD_MMC.rename(tarTmpPath.c_str(), tarPath.c_str())) {
+      Serial.printf("Background Task: Failed to rename %s -> %s; removing temp archive\n", tarTmpPath.c_str(), tarPath.c_str());
+      SD_MMC.remove(tarTmpPath.c_str());
+      packFailed = true;
+    }
+  } else {
+    Serial.printf("Background Task: TAR packing failed for %s; cleaning up %s\n", sessionIdStr, tarTmpPath.c_str());
+    SD_MMC.remove(tarTmpPath.c_str());
+  }
+  if (sd_mutex) xSemaphoreGive(sd_mutex);
+
   free(header); free(buf); free(empty);
   
-  Serial.printf("Background Task: Finished packing %s\n", tarPath.c_str());
+  if (!packFailed) {
+    Serial.printf("Background Task: Finished packing %s\n", tarPath.c_str());
+  }
   vTaskDelete(NULL);
 }
 
@@ -1261,9 +1434,54 @@ void persistOpenSession(bool open) {
   preferences.end();
 }
 
-// Appends one finished session to /lapse/sessions.jsonl and starts packing it into a .tar
+void scheduleDeleteSessionFiles(int sess) {
+  if (!sdCardAvailable || sess <= 0) return;
+  char *sessArg = (char *)malloc(32);
+  if (!sessArg) return;
+  snprintf(sessArg, 32, "s%04d", sess);
+  xTaskCreatePinnedToCore([](void *param) {
+    String sessStr = String((char *)param);
+    free(param);
+    if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
+    File dir = SD_MMC.open("/lapse");
+    std::vector<String> toDelete;
+    if (dir) {
+      bool isDir = false;
+      String filepath = dir.getNextFileName(&isDir);
+      while (filepath.length() > 0) {
+        int lastSlash = filepath.lastIndexOf('/');
+        String filename = (lastSlash != -1) ? filepath.substring(lastSlash + 1) : filepath;
+        if (!isDir && (filename.startsWith(sessStr + "_") || filename == (sessStr + ".tar") || filename == (sessStr + ".tar.tmp"))) {
+          toDelete.push_back("/lapse/" + filename);
+        }
+        filepath = dir.getNextFileName(&isDir);
+      }
+      dir.close();
+    }
+    if (sd_mutex) xSemaphoreGive(sd_mutex);
+
+    for (size_t i = 0; i < toDelete.size(); i++) {
+      if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
+      SD_MMC.remove(toDelete[i].c_str());
+      if (sd_mutex) xSemaphoreGive(sd_mutex);
+      if ((i % 10) == 9) vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    Serial.printf("Background Task: Discarded short/deleted session %s (%u files removed)\n",
+                  sessStr.c_str(), (unsigned int)toDelete.size());
+    vTaskDelete(NULL);
+  }, "delSessTask", 8192, sessArg, 1, NULL, 1);
+}
+
+// Appends one finished session (> 20 frames) to /lapse/sessions.jsonl and starts packing it into a .tar
 void appendSessionRecord(int sess, int frames, String ts, int jobId, String jobName) {
-  if (!sdCardAvailable || frames <= 0) return;
+  if (!sdCardAvailable) return;
+  if (frames < MIN_TIMELAPSE_FRAMES) {
+    if (frames > 0) {
+      Serial.printf("Discarding short session s%04d (%d frames <= 20)\n", sess, frames);
+      scheduleDeleteSessionFiles(sess);
+    }
+    return;
+  }
 
   if (ts == "") {
     time_t now = time(nullptr);
@@ -1278,14 +1496,16 @@ void appendSessionRecord(int sess, int frames, String ts, int jobId, String jobN
     }
   }
 
+  String camNameCopy = readStringLocked(cameraName);
+  String macStr = getDeviceMacHex();
+
   if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
   File jsonFile = SD_MMC.open("/lapse/sessions.jsonl", FILE_APPEND);
   if (jsonFile) {
-    String macStr = getDeviceMacHex();
     if (ts != "") {
-      jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"timestamp\":\"%s\",\"job_id\":%d,\"job_name\":\"%s\",\"mac\":\"%s\",\"camera_name\":\"%s\"}\n", sess, frames, ts.c_str(), jobId, jobName.c_str(), macStr.c_str(), cameraName.c_str());
+      jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"timestamp\":\"%s\",\"job_id\":%d,\"job_name\":\"%s\",\"mac\":\"%s\",\"camera_name\":\"%s\"}\n", sess, frames, ts.c_str(), jobId, jobName.c_str(), macStr.c_str(), camNameCopy.c_str());
     } else {
-      jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"job_id\":%d,\"job_name\":\"%s\",\"mac\":\"%s\",\"camera_name\":\"%s\"}\n", sess, frames, jobId, jobName.c_str(), macStr.c_str(), cameraName.c_str());
+      jsonFile.printf("{\"session\":\"s%04d\",\"frames\":%d,\"job_id\":%d,\"job_name\":\"%s\",\"mac\":\"%s\",\"camera_name\":\"%s\"}\n", sess, frames, jobId, jobName.c_str(), macStr.c_str(), camNameCopy.c_str());
     }
     jsonFile.close();
     if (sd_mutex) xSemaphoreGive(sd_mutex);
@@ -1300,7 +1520,7 @@ void appendSessionRecord(int sess, int frames, String ts, int jobId, String jobN
 // Closes the session that is currently being recorded under the print it actually belongs to
 void finalizeOpenSession() {
   if (offlineMode) {
-    appendSessionRecord(sessionId, offlineFrameCount, sessionStartTimestamp, currentJobId, currentJobName);
+    appendSessionRecord(sessionId, offlineFrameCount, sessionStartTimestamp, currentJobId, readStringLocked(currentJobName));
   }
   offlineSessionOpen = false;
   persistOpenSession(false);
@@ -1366,10 +1586,14 @@ void beginOfflineSession() {
         // Same print, the camera just restarted mid-print: keep recording into the same timelapse
         resumeExistingSession = true;
         resumedTimestamp = aTs;
-      } else if (existingFrames > 0) {
-        // Different (or unknown) print: close the orphan under ITS OWN job info so frames never mix
+      } else if (existingFrames >= MIN_TIMELAPSE_FRAMES) {
+        // Different (or unknown) print (> 20 frames): close the orphan under ITS OWN job info so frames never mix
         Serial.printf("Closing orphan session s%04d (%d frames, job %d) before starting job %d\n", sessionId, existingFrames, haveMeta ? aJob : -1, currentJobId);
         appendSessionRecord(sessionId, existingFrames, haveMeta ? aTs : String(""), haveMeta ? aJob : -1, haveMeta ? aName : String(""));
+      } else if (existingFrames > 0) {
+        // Short orphan session (<= 20 frames): discard it cleanly instead of archiving
+        Serial.printf("Discarding short orphan session s%04d (%d frames <= 20) before starting job %d\n", sessionId, existingFrames, currentJobId);
+        scheduleDeleteSessionFiles(sessionId);
       } else {
         // Empty leftover session: safe to simply reuse its number
         resumeExistingSession = true;
@@ -1447,36 +1671,20 @@ void setupWebServer() {
     Serial.println("Sent saved photo via HTTP");
   });
 
-  // 3. Live MJPEG Stream endpoint (~4 FPS, SVGA, preemptible for timelapse captures)
+  // 3. Live MJPEG Stream endpoint (~4 FPS, SVGA, locked by print-start mode)
   server.on("/stream", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (print_mode_locked && !print_locked_stream) {
+      request->send(409, "application/json", "{\"error\":\"Stream mode locked to snapshot while printing\"}");
+      return;
+    }
+
     stream_client_id++;
     uint32_t thisClientId = stream_client_id;
 
-    if (stream_active) {
-      uint32_t waitMs = 0;
-      while (stream_active && waitMs < 300) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-        waitMs += 20;
-      }
-    }
-
     stream_active = true;
-
-    if (camera_mutex && xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-      sensor_t *s = esp_camera_sensor_get();
-      if (s) {
-        if (s->status.framesize != FRAMESIZE_SVGA) {
-          s->set_framesize(s, FRAMESIZE_SVGA);
-          s->set_quality(s, 12);
-          vTaskDelay(pdMS_TO_TICKS(100));
-          for (int i = 0; i < 2; i++) {
-            camera_fb_t *flush_fb = esp_camera_fb_get();
-            if (flush_fb) esp_camera_fb_return(flush_fb);
-          }
-        }
-      }
-      xSemaphoreGive(camera_mutex);
-    }
+    desired_sensor_framesize = FRAMESIZE_SVGA;
+    desired_sensor_quality = 12;
+    sensor_framesize_dirty = true;
 
     AsyncJpegStreamResponse *response = new AsyncJpegStreamResponse(thisClientId);
     if (!response) {
@@ -1490,6 +1698,11 @@ void setupWebServer() {
     request->onDisconnect([thisClientId]() {
       if (thisClientId == stream_client_id) {
         stream_active = false;
+        if (!(print_mode_locked && print_locked_stream)) {
+          desired_sensor_framesize = psramFound() ? FRAMESIZE_UXGA : FRAMESIZE_VGA;
+          desired_sensor_quality = 10;
+          sensor_framesize_dirty = true;
+        }
       }
     });
     request->send(response);
@@ -1577,19 +1790,19 @@ void setupWebServer() {
           return;
         }
 
-        prusaConnectToken = newToken;
+        writeStringLocked(prusaConnectToken, newToken);
         prusaConnectInfoSent = false; // Reset to re-register info next loop
         
         // Save to NVS
         preferences.begin("prusalapse", false);
-        preferences.putString("connectToken", prusaConnectToken);
+        preferences.putString("connectToken", newToken);
         preferences.end();
         
         // Save to config.txt
         saveConfigToSD();
         status = 200;
         message = "OK";
-        Serial.printf("Prusa Connect token set: %s\n", prusaConnectToken.length() > 0 ? "SET" : "CLEARED");
+        Serial.printf("Prusa Connect token set: %s\n", newToken.length() > 0 ? "SET" : "CLEARED");
       } else if (var == "fingerprint") {
         String newFp = "";
         if (request->hasArg("fingerprint")) {
@@ -1600,8 +1813,8 @@ void setupWebServer() {
         newFp.trim();
         preferences.begin("prusalapse", false);
         if (newFp.length() >= 16) {
-          prusaConnectFingerprint = newFp;
-          preferences.putString("fingerprint", prusaConnectFingerprint);
+          writeStringLocked(prusaConnectFingerprint, newFp);
+          preferences.putString("fingerprint", newFp);
         } else if (newFp.length() == 0) {
           preferences.remove("fingerprint");
           uint8_t mac[6];
@@ -1611,47 +1824,70 @@ void setupWebServer() {
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
             mac[5], mac[4], mac[3], mac[2], mac[1], mac[0],
             mac[0] ^ 0xAA, mac[1] ^ 0x55, mac[2] ^ 0xFF, mac[3] ^ 0x42);
-          prusaConnectFingerprint = String(fpBuf);
+          writeStringLocked(prusaConnectFingerprint, String(fpBuf));
         }
         preferences.end();
         prusaConnectInfoSent = false;
         status = 200;
         message = "OK";
-        Serial.printf("Fingerprint updated: %s\n", prusaConnectFingerprint.c_str());
+        Serial.printf("Fingerprint updated: %s\n", readStringLocked(prusaConnectFingerprint).c_str());
       } else if (var == "offline") {
         offlineMode = (val == 1);
         if (request->hasArg("prusa_ip")) {
-          prusaIp = request->arg("prusa_ip");
+          writeStringLocked(prusaIp, request->arg("prusa_ip"));
         }
         if (request->hasArg("prusa_key")) {
-          prusaApiKey = request->arg("prusa_key");
+          writeStringLocked(prusaApiKey, request->arg("prusa_key"));
         }
         
         // Save to NVS
         preferences.begin("prusalapse", false);
         preferences.putBool("offlineMode", offlineMode);
-        preferences.putString("prusaIp", prusaIp);
-        preferences.putString("prusaApiKey", prusaApiKey);
+        preferences.putString("prusaIp", readStringLocked(prusaIp));
+        preferences.putString("prusaApiKey", readStringLocked(prusaApiKey));
         preferences.end();
         
         // Save to config.txt
         saveConfigToSD();
         status = 200;
         message = "OK";
-        Serial.printf("Offline mode set: %d, IP: %s\n", val, prusaIp.c_str());
+        Serial.printf("Offline mode set: %d, IP: %s\n", val, readStringLocked(prusaIp).c_str());
       } else if (var == "camera_name") {
-        if (request->hasArg("name")) {
-          cameraName = request->arg("name");
-        } else {
-          cameraName = request->arg("val");
-        }
+        String newName = request->hasArg("name") ? request->arg("name") : request->arg("val");
+        writeStringLocked(cameraName, newName);
         preferences.begin("prusalapse", false);
-        preferences.putString("cameraName", cameraName);
+        preferences.putString("cameraName", newName);
         preferences.end();
         saveConfigToSD();
         status = 200;
         message = "OK";
-        Serial.printf("Camera name set: %s\n", cameraName.c_str());
+        Serial.printf("Camera name set: %s\n", newName.c_str());
+      } else if (var == "print_lock") {
+        if (val == 1) {
+          if (!print_mode_locked) {
+            print_locked_stream = stream_active;
+            print_mode_locked = true;
+            manual_print_lock = true;
+            desired_sensor_framesize = print_locked_stream ? FRAMESIZE_SVGA : (psramFound() ? FRAMESIZE_UXGA : FRAMESIZE_VGA);
+            desired_sensor_quality = print_locked_stream ? 12 : 10;
+            sensor_framesize_dirty = true;
+          }
+          status = 200;
+          message = "OK";
+        } else {
+          if (manual_print_lock) {
+            manual_print_lock = false;
+            print_mode_locked = false;
+            print_locked_stream = false;
+            if (!stream_active) {
+              desired_sensor_framesize = psramFound() ? FRAMESIZE_UXGA : FRAMESIZE_VGA;
+              desired_sensor_quality = 10;
+              sensor_framesize_dirty = true;
+            }
+          }
+          status = 200;
+          message = "OK";
+        }
       } else {
         // Use 100ms lock check to prevent blocking the network task during active capturing
         if (camera_mutex && xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -1696,17 +1932,20 @@ void setupWebServer() {
     sensor_t * s = esp_camera_sensor_get();
     
     // Build JSON with Prusa Connect token (masked for security)
+    String tokCopy = readStringLocked(prusaConnectToken);
+    String fpCopy = readStringLocked(prusaConnectFingerprint);
+    String camNameCopy = readStringLocked(cameraName);
     String tokenMasked = "";
-    if (prusaConnectToken.length() > 4) {
-      tokenMasked = prusaConnectToken.substring(0, 4) + "****";
-    } else if (prusaConnectToken.length() > 0) {
+    if (tokCopy.length() > 4) {
+      tokenMasked = tokCopy.substring(0, 4) + "****";
+    } else if (tokCopy.length() > 0) {
       tokenMasked = "****";
     }
 
     String macStr = getDeviceMacHex();
-    char json[832];
+    char json[1024];
     snprintf(json, sizeof(json), 
-      "{\"brightness\":%d,\"contrast\":%d,\"hmirror\":%d,\"vflip\":%d,\"led\":%d,\"sd_available\":%d,\"offline_mode\":%d,\"prusa_connect_token\":\"%s\",\"prusa_connect_configured\":%d,\"prusa_connect_code\":%d,\"fingerprint\":\"%s\",\"mac\":\"%s\",\"camera_name\":\"%s\",\"firmware_version\":\"%s\",\"sensor_ok\":%d}",
+      "{\"brightness\":%d,\"contrast\":%d,\"hmirror\":%d,\"vflip\":%d,\"led\":%d,\"sd_available\":%d,\"offline_mode\":%d,\"prusa_connect_token\":\"%s\",\"prusa_connect_configured\":%d,\"prusa_connect_code\":%d,\"fingerprint\":\"%s\",\"mac\":\"%s\",\"camera_name\":\"%s\",\"firmware_version\":\"%s\",\"sensor_ok\":%d,\"stream_active\":%d,\"print_mode_locked\":%d,\"print_locked_stream\":%d}",
       s ? s->status.brightness : brightnessVal,
       s ? s->status.contrast : contrastVal,
       s ? s->status.hmirror : hmirrorVal,
@@ -1715,13 +1954,16 @@ void setupWebServer() {
       sdCardAvailable ? 1 : 0,
       offlineMode ? 1 : 0,
       tokenMasked.c_str(),
-      prusaConnectToken.length() > 0 ? 1 : 0,
+      tokCopy.length() > 0 ? 1 : 0,
       last_prusa_connect_code,
-      prusaConnectFingerprint.c_str(),
+      fpCopy.c_str(),
       macStr.c_str(),
-      cameraName.c_str(),
+      camNameCopy.c_str(),
       FIRMWARE_VERSION,
-      s ? 1 : 0
+      s ? 1 : 0,
+      stream_active ? 1 : 0,
+      print_mode_locked ? 1 : 0,
+      print_locked_stream ? 1 : 0
     );
     
     request->send(200, "application/json", json);
@@ -1861,11 +2103,19 @@ void setupWebServer() {
   // last_http_code is declared globally
 
   server.on("/camera_status", HTTP_GET, [](AsyncWebServerRequest *request){
+    String ipCopy = readStringLocked(prusaIp);
+    String keyCopy = readStringLocked(prusaApiKey);
+    String fpCopy = readStringLocked(prusaConnectFingerprint);
+    String trigCopy = readStringLocked(activeTriggerMode);
+    String jobCopy = readStringLocked(currentJobName);
+    String stateCopy = readStringLocked(currentPrinterState);
+    String camNameCopy = readStringLocked(cameraName);
+
     String json = "{";
     json += "\"frame_count\":" + String(offlineFrameCount) + ",";
-    json += "\"prusa_ip\":\"" + prusaIp + "\",";
-    json += "\"prusa_key\":\"" + prusaApiKey + "\",";
-    json += "\"poll_url\":\"http://" + prusaIp + "/api/v1/status\",";
+    json += "\"prusa_ip\":\"" + ipCopy + "\",";
+    json += "\"prusa_key\":\"" + keyCopy + "\",";
+    json += "\"poll_url\":\"http://" + ipCopy + "/api/v1/status\",";
     json += "\"offline_mode\":" + String(offlineMode ? 1 : 0) + ",";
     json += "\"sd_available\":" + String(sdCardAvailable ? 1 : 0) + ",";
     json += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
@@ -1874,18 +2124,21 @@ void setupWebServer() {
     json += "\"last_http_code\":" + String(last_http_code) + ",";
     json += "\"last_prusa_connect_code\":" + String(last_prusa_connect_code) + ",";
     json += "\"prusa_connect_info_sent\":" + String(prusaConnectInfoSent ? 1 : 0) + ",";
-    json += "\"fingerprint\":\"" + prusaConnectFingerprint + "\",";
+    json += "\"fingerprint\":\"" + fpCopy + "\",";
     json += "\"mac\":\"" + getDeviceMacHex() + "\",";
     json += "\"last_z\":" + String(currentZValue) + ",";
     json += "\"max_z\":" + String(maxConfirmedZ) + ",";
-    json += "\"trigger_mode\":\"" + activeTriggerMode + "\",";
+    json += "\"trigger_mode\":\"" + trigCopy + "\",";
     json += "\"job_id\":" + String(currentJobId) + ",";
-    json += "\"job_name\":\"" + currentJobName + "\",";
-    json += "\"printer_state\":\"" + currentPrinterState + "\",";
+    json += "\"job_name\":\"" + jobCopy + "\",";
+    json += "\"printer_state\":\"" + stateCopy + "\",";
     json += "\"job_progress\":" + String(currentJobProgress, 1) + ",";
     json += "\"temp_nozzle\":" + String(currentTempNozzle, 1) + ",";
-    json += "\"camera_name\":\"" + cameraName + "\",";
+    json += "\"camera_name\":\"" + camNameCopy + "\",";
     json += "\"wifi_rssi\":" + String(WiFi.RSSI()) + ",";
+    json += "\"stream_active\":" + String(stream_active ? 1 : 0) + ",";
+    json += "\"print_mode_locked\":" + String(print_mode_locked ? 1 : 0) + ",";
+    json += "\"print_locked_stream\":" + String(print_locked_stream ? 1 : 0) + ",";
     json += "\"firmware_version\":\"" + String(FIRMWARE_VERSION) + "\"";
     json += "}";
     request->send(200, "application/json", json);
@@ -1893,7 +2146,8 @@ void setupWebServer() {
 
   server.on("/delete_session_sd", HTTP_GET, [](AsyncWebServerRequest *request){
     if (!sdCardAvailable) { request->send(503, "text/plain", "SD Card not available"); return; }
-    if (currentPrinterState == "PRINTING" || currentPrinterState == "PAUSED") {
+    String stateCopy = readStringLocked(currentPrinterState);
+    if (stateCopy == "PRINTING" || stateCopy == "PAUSED") {
       request->send(409, "text/plain", "Cannot delete session while timelapse is actively recording");
       return;
     }
@@ -1921,7 +2175,7 @@ void setupWebServer() {
       xSemaphoreGive(sd_mutex);
     }
 
-    // Delete jpg and tar files asynchronously in a background task so AsyncTCP never blocks or resets
+    // Delete jpg, tar, and tar.tmp files asynchronously in a background task without holding sd_mutex for long stretches
     char *sessArg = (char *)malloc(32);
     if (sessArg) {
       strncpy(sessArg, sessionParam.c_str(), 31);
@@ -1929,6 +2183,7 @@ void setupWebServer() {
       xTaskCreatePinnedToCore([](void *param) {
         String sess = String((char *)param);
         free(param);
+        std::vector<String> toDelete;
         if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
         File dir = SD_MMC.open("/lapse");
         if (dir) {
@@ -1937,16 +2192,22 @@ void setupWebServer() {
           while (filepath.length() > 0) {
             int lastSlash = filepath.lastIndexOf('/');
             String filename = (lastSlash != -1) ? filepath.substring(lastSlash + 1) : filepath;
-            if (!isDir && (filename.startsWith(sess + "_") || filename.endsWith(sess + ".tar"))) {
-              SD_MMC.remove("/lapse/" + filename);
-              vTaskDelay(pdMS_TO_TICKS(1));
+            if (!isDir && (filename.startsWith(sess + "_") || filename == (sess + ".tar") || filename == (sess + ".tar.tmp"))) {
+              toDelete.push_back("/lapse/" + filename);
             }
             filepath = dir.getNextFileName(&isDir);
           }
           dir.close();
         }
         if (sd_mutex) xSemaphoreGive(sd_mutex);
-        Serial.printf("Background Task: Deleted session %s from SD\n", sess.c_str());
+
+        for (size_t i = 0; i < toDelete.size(); i++) {
+          if (sd_mutex) xSemaphoreTake(sd_mutex, portMAX_DELAY);
+          SD_MMC.remove(toDelete[i].c_str());
+          if (sd_mutex) xSemaphoreGive(sd_mutex);
+          if ((i % 10) == 9) vTaskDelay(pdMS_TO_TICKS(5));
+        }
+        Serial.printf("Background Task: Deleted session %s from SD (%u files)\n", sess.c_str(), (unsigned int)toDelete.size());
         vTaskDelete(NULL);
       }, "delSessTask", 8192, sessArg, 1, NULL, 1);
     }
@@ -2187,7 +2448,9 @@ void setup() {
   camera_mutex = xSemaphoreCreateMutex();
   snapshot_mutex = xSemaphoreCreateMutex();
   sd_mutex = xSemaphoreCreateMutex();
+  state_mutex = xSemaphoreCreateMutex();
   sd_write_semaphore = xSemaphoreCreateBinary();
+  cleanupTempTarFiles();
   xTaskCreatePinnedToCore(sdWriteTask, "sdWriteTask", 8192, NULL, 1, &sdWriteTaskHandle, 1);
 
   // Let 3.3V rail recover from SD card inrush before powering sensor
@@ -2236,24 +2499,32 @@ void setup() {
         vTaskDelay(pdMS_TO_TICKS(1000));
         continue; // Pause PrusaLink polling while client is actively downloading SD timelapses
       }
-      if (WiFi.status() == WL_CONNECTED && prusaIp != "") {
-        prusaIp.trim();
-        prusaApiKey.trim();
-        
+      String safePrusaIp = readStringLocked(prusaIp);
+      String safePrusaKey = readStringLocked(prusaApiKey);
+      safePrusaIp.trim();
+      safePrusaKey.trim();
+      if (WiFi.status() == WL_CONNECTED && safePrusaIp != "") {
         WiFiClient client;
         client.setTimeout(2); // 2-second TCP timeout prevents indefinite FreeRTOS task hangs
         HTTPClient http;
         http.setReuse(false);
         http.setTimeout(2500); // 2.5-second stream timeout
         
-        http.begin(client, "http://" + prusaIp + "/api/v1/status");
-        http.addHeader("X-Api-Key", prusaApiKey);
+        http.begin(client, "http://" + safePrusaIp + "/api/v1/status");
+        http.addHeader("X-Api-Key", safePrusaKey);
         const char* headers[] = {"Date"};
         http.collectHeaders(headers, 1);
         int httpCode = http.GET();
         last_http_code = httpCode;
+        String payload = "";
+        String dateHeader = "";
         if (httpCode == 200) {
-          String dateHeader = http.header("Date");
+          dateHeader = http.header("Date");
+          payload = http.getString();
+        }
+        http.end(); // Always release PrusaLink /api/v1/status socket BEFORE opening jobHttp or triggers
+
+        if (httpCode == 200) {
           if (dateHeader.length() > 0) {
             time_t parsedTime = parseHttpDate(dateHeader);
             if (parsedTime > 1000000) {
@@ -2263,7 +2534,6 @@ void setup() {
               settimeofday(&tv, NULL);
             }
           }
-          String payload = http.getString();
           
           String state = "";
           float axis_z = -1.0;
@@ -2357,7 +2627,7 @@ void setup() {
             }
           }
 
-          currentPrinterState = state;
+          writeStringLocked(currentPrinterState, state);
           if (job_progress >= 0.0f) currentJobProgress = job_progress;
           if (temp_nozzle >= 0.0f) currentTempNozzle = temp_nozzle;
           if (target_nozzle >= 0.0f) currentTargetNozzle = target_nozzle;
@@ -2369,7 +2639,6 @@ void setup() {
           bool jobRollover = (jobId > 0 && currentJobId > 0 && jobId != currentJobId);
           if (jobRollover && printSessionActive && offlineMode && (capture_in_progress || sd_write_in_progress)) {
             // Let the in-flight frame land in the OLD session first
-            http.end();
             vTaskDelay(pdMS_TO_TICKS(150));
             continue;
           }
@@ -2379,12 +2648,15 @@ void setup() {
               finalizeOpenSession();
               printSessionActive = false;
             }
+            print_mode_locked = false;
+            print_locked_stream = false;
+            manual_print_lock = false;
             maxConfirmedZ = -1.0;
             prevPollZ = -1.0;
             zStableCount = 0;
             gcodeTriggerUsedInJob = false;
-            activeTriggerMode = "auto";
-            currentJobName = "";
+            writeStringLocked(activeTriggerMode, "auto");
+            writeStringLocked(currentJobName, "");
           }
           if (jobId > 0) {
             bool idChanged = (currentJobId != jobId);
@@ -2394,13 +2666,16 @@ void setup() {
 
           // Fetch print filename once per active job from /api/v1/job
           static uint32_t lastJobNameFetchMs = 0;
-          if (state == "PRINTING" && currentJobName.length() == 0 && (millis() - lastJobNameFetchMs > 30000 || lastJobNameFetchMs == 0)) {
+          String jobNameCopy = readStringLocked(currentJobName);
+          if (state == "PRINTING" && jobNameCopy.length() == 0 && (millis() - lastJobNameFetchMs > 30000 || lastJobNameFetchMs == 0)) {
             lastJobNameFetchMs = millis();
+            WiFiClient jobClient;
+            jobClient.setTimeout(2);
             HTTPClient jobHttp;
             jobHttp.setReuse(false);
             jobHttp.setTimeout(2000);
-            jobHttp.begin("http://" + prusaIp + "/api/v1/job");
-            jobHttp.addHeader("X-Api-Key", prusaApiKey);
+            jobHttp.begin(jobClient, "http://" + safePrusaIp + "/api/v1/job");
+            jobHttp.addHeader("X-Api-Key", safePrusaKey);
             int jCode = jobHttp.GET();
             if (jCode == 200) {
               String jPayload = jobHttp.getString();
@@ -2428,8 +2703,8 @@ void setup() {
               extracted.replace("\\", "");
               extracted.trim();
               if (extracted.length() > 0) {
-                currentJobName = extracted;
-                Serial.printf("Detected active print job name: %s\n", currentJobName.c_str());
+                writeStringLocked(currentJobName, extracted);
+                Serial.printf("Detected active print job name: %s\n", extracted.c_str());
                 if (offlineSessionOpen) persistOpenSession(true);
               }
             }
@@ -2440,18 +2715,41 @@ void setup() {
           if (state != "") {
             if (state == "PRINTING" && !printSessionActive) {
               printSessionActive = true;
+              // Lock active Live Stream vs Snapshot mode for the entire duration of the print
+              print_locked_stream = stream_active;
+              print_mode_locked = true;
+              manual_print_lock = false;
+              desired_sensor_framesize = print_locked_stream ? FRAMESIZE_SVGA : (psramFound() ? FRAMESIZE_UXGA : FRAMESIZE_VGA);
+              desired_sensor_quality = print_locked_stream ? 12 : 10;
+              sensor_framesize_dirty = true;
+              Serial.printf("Print started: Locked capture mode to %s\n", print_locked_stream ? "Live Stream (SVGA)" : "Snapshot (UXGA)");
+
               maxConfirmedZ = -1.0;
               prevPollZ = -1.0;
               zStableCount = 0;
               gcodeTriggerUsedInJob = false;
-              activeTriggerMode = "auto";
+              writeStringLocked(activeTriggerMode, "auto");
 
               if (offlineMode) {
                 beginOfflineSession(); // job-aware: resumes only the SAME print after a reboot, never a different one
               }
             } else if (printSessionActive && state != "PRINTING" && state != "PAUSED" && state != "ATTENTION" && state != "BUSY") {
+              // Wait briefly for any final in-flight capture / SD write so offlineFrameCount is accurate before closing
+              uint32_t settleWaited = 0;
+              while ((capture_in_progress || sd_write_in_progress) && settleWaited < 4000) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                settleWaited += 100;
+              }
               printSessionActive = false;
-              activeTriggerMode = "auto";
+              print_mode_locked = false;
+              print_locked_stream = false;
+              manual_print_lock = false;
+              if (!stream_active) {
+                desired_sensor_framesize = psramFound() ? FRAMESIZE_UXGA : FRAMESIZE_VGA;
+                desired_sensor_quality = 10;
+                sensor_framesize_dirty = true;
+              }
+              writeStringLocked(activeTriggerMode, "auto");
 
               if (offlineMode) {
                 finalizeOpenSession(); // closes the session under the print it belongs to + clears the persisted open-session marker
@@ -2578,7 +2876,6 @@ void setup() {
           pollInterval = (previousPrinterState == "PRINTING") ? 2000 : 10000;
           Serial.printf("PrusaLink poll failed (code %d). Next poll in %dms.\n", httpCode, pollInterval);
         }
-        http.end();
       }
       vTaskDelay(pdMS_TO_TICKS(pollInterval));
     }
@@ -2641,6 +2938,18 @@ void loop() {
     hardware_trigger_flag = false;
     Serial.println("Hardware Trigger (GPIO/Serial) detected! Capturing layer...");
     triggerCapture();
+  }
+
+  // Safely apply pending sensor framesize/quality restoration outside AsyncTCP callbacks
+  if (sensor_framesize_dirty && !stream_active && !capture_in_progress && !sd_write_in_progress) {
+    if (camera_mutex && xSemaphoreTake(camera_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      sensor_t *s = esp_camera_sensor_get();
+      if (s) {
+        applyDesiredSensorFrameSize(s, desired_sensor_framesize, desired_sensor_quality, true);
+      }
+      sensor_framesize_dirty = false;
+      xSemaphoreGive(camera_mutex);
+    }
   }
 
   // Dynamic polling interval based on printer state is now handled in prusaLinkTask

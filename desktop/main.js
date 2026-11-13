@@ -100,7 +100,8 @@ async function startServer() {
   const serverDir = path.dirname(serverScript);
   const ffmpegPath = findFfmpegPath();
 
-  const userDataDir = app.getPath('userData');
+  // Canonical AppData\Roaming\PrusaLapse directory (unified with OrcaSlicer plugin and headless server)
+  const userDataDir = path.join(app.getPath('appData'), 'PrusaLapse');
   const userCapturesDir = path.join(userDataDir, 'captures');
   const userConfigFile = path.join(userDataDir, 'prusa-lapse.config.json');
 

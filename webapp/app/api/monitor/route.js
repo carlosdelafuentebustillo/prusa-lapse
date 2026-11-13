@@ -38,7 +38,7 @@ export async function POST(request) {
     await monitor.start();
     return NextResponse.json({ success: true, status: 'started' });
   } else if (action === 'stop') {
-    monitor.stop();
+    await monitor.stop();
     return NextResponse.json({ success: true, status: 'stopped' });
   } else if (action === 'capture') {
     const result = await monitor.manualTrigger();
